@@ -132,6 +132,7 @@ class SelectObjects:
 
             def msg(str):
                 raise ValueError(str)
+
         else:
             msg = logger.warning
 
@@ -504,7 +505,7 @@ def clear_scene(keep=[], targets=None, materials=True):
     for t in targets:
         if t in keep:
             continue
-        for o in t:
+        for o in list(t):
             if o in keep or o.name in keep:
                 continue
             t.remove(o)
