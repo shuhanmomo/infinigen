@@ -18,8 +18,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument(
         "--script",
-        required=True,
+        default=None,
         help="Path to sanitized script (e.g., outputs/chairs/variant_041/Chair_sanitized.py)",
+    )
+    p.add_argument(
+        "--dir",
+        default=None,
+        help="Optional directory to batch-replay all sanitized scripts (recursively)",
+    )
+    p.add_argument(
+        "--pattern",
+        default="Chair_sanitized.py",
+        help="Filename pattern to search under --dir (default: Chair_sanitized.py)",
     )
     p.add_argument(
         "--output",
@@ -65,16 +75,37 @@ def run_sanitized(
 
 def main() -> int:
     args = parse_args()
-    script_path = Path(args.script).resolve()
-    if not script_path.exists():
-        raise FileNotFoundError(f"Sanitized script not found: {script_path}")
+    ran_any = False
 
-    if args.output:
-        output_blend = Path(args.output).resolve()
-    else:
-        output_blend = script_path.parent / "scene_replay.blend"
+    # Batch mode
+    if args.dir:
+        root = Path(args.dir).resolve()
+        if not root.exists():
+            raise FileNotFoundError(f"Directory not found: {root}")
+        scripts = sorted(root.rglob(args.pattern))
+        for sp in scripts:
+            outp = sp.parent / "scene_replay.blend"
+            print(f"[run_sanitized] Running: {sp}")
+            run_sanitized(sp, outp, clear_scene=not args.no_clear)
+            print(f"[run_sanitized] Saved: {outp}")
+            ran_any = True
 
-    run_sanitized(script_path, output_blend, clear_scene=not args.no_clear)
+    # Single-file mode
+    if args.script:
+        script_path = Path(args.script).resolve()
+        if not script_path.exists():
+            raise FileNotFoundError(f"Sanitized script not found: {script_path}")
+        if args.output:
+            output_blend = Path(args.output).resolve()
+        else:
+            output_blend = script_path.parent / "scene_replay.blend"
+        print(f"[run_sanitized] Running: {script_path}")
+        run_sanitized(script_path, output_blend, clear_scene=not args.no_clear)
+        print(f"[run_sanitized] Saved: {output_blend}")
+        ran_any = True
+
+    if not ran_any:
+        print("[run_sanitized] Nothing to do (no --script and no --dir matches)")
     return 0
 
 

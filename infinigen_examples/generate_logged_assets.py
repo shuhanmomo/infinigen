@@ -16,6 +16,15 @@ from infinigen.assets.objects.seating.chairs.chair_logged import ChairFactoryLog
 def make_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seeds", type=int, nargs="*", default=[41, 42])
+    parser.add_argument(
+        "--start_seed", type=int, default=None, help="Start seed for range generation"
+    )
+    parser.add_argument(
+        "--variants",
+        type=int,
+        default=0,
+        help="Number of sequential variants to generate from start_seed",
+    )
     parser.add_argument("--output_root", type=Path, default=Path("outputs/chairs"))
     parser.add_argument("--resolution", type=str, default="1024x1024")
     parser.add_argument("--samples", type=int, default=64)
@@ -41,16 +50,20 @@ def generate_one(seed: int, output_root: Path):
     with FixedSeed(seed):
         parent = fac.spawn_asset(seed)
 
-    # Save .blend
+    # Save .blend if requested
     blend_path = out_dir / "scene.blend"
-    butil.save_blend(blend_path, autopack=True)
+    if ARGS.save_blend:
+        butil.save_blend(blend_path, autopack=True)
 
-    # Export sanitized script
-    script_path = out_dir / "Chair_sanitized.py"
-    fac.export_sanitized_script(str(script_path))
+    # Export sanitized script if requested
+    if ARGS.export_script:
+        script_path = out_dir / "Chair_sanitized.py"
+        fac.export_sanitized_script(str(script_path))
 
-    print(f"Saved: {blend_path}")
-    print(f"Saved: {script_path}")
+    if ARGS.save_blend:
+        print(f"Saved: {blend_path}")
+    if ARGS.export_script:
+        print(f"Saved: {out_dir / 'Chair_sanitized.py'}")
 
 
 def main(args):
@@ -73,7 +86,17 @@ def main(args):
 
     args.output_root.mkdir(parents=True, exist_ok=True)
 
-    for seed in args.seeds:
+    # Compute seed list based on either explicit --seeds or --start_seed/--variants
+    seeds = list(args.seeds) if args.seeds else []
+    if args.start_seed is not None and args.variants and args.variants > 0:
+        seeds = [args.start_seed + i for i in range(args.variants)]
+    elif not seeds:
+        seeds = [41, 42]
+
+    global ARGS
+    ARGS = args
+
+    for seed in seeds:
         generate_one(seed, args.output_root)
 
 

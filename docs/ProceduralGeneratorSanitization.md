@@ -5,6 +5,33 @@ This document defines rules and conventions for creating a "logged" variant of a
 - Emit a sanitized script that recreates the exact same asset using only low-level function calls with constant arguments.
 
 The goal is a small, deterministic, dependency-light script that reproduces one concrete asset instance without randomization, high-level control flow, or semantic variable names.
+- command for running logged assets generation:
+```
+blender/blender.exe -b --python infinigen_examples/generate_logged_assets.py -- --start_seed 41 --variants 20 --save_blend --export_script
+```
+
+alternatively, pass an explicit list of seeds
+```
+blender/blender.exe -b --python infinigen_examples/generate_logged_assets.py -- --seeds 41 42  --save_blend --export_script
+```
+
+- command for replay scripts to reconstruct blender scene
+single replay
+```
+blender/blender.exe -b --python infinigen_examples/run_sanitized.py -- --script outputs/chairs/variant_041/Chair_sanitized.py
+```
+
+Batch replay all sanitized scripts under a directory (recursive):
+```
+blender/blender.exe -b --python infinigen_examples/run_sanitized.py -- --dir outputs/chairs
+```
+
+Batch with custom filename pattern:
+```
+blender/blender.exe -b --python infinigen_examples/run_sanitized.py -- --dir outputs/chairs --pattern '_sanitized.py'
+```
+
+keep scene (don't clear) for each run: add `--no-clear`
 
 ## Outputs
 - **Blender objects**: Generated as usual by the logged variant; do not merge parts into a single mesh. Each piece stays a separate object and is named `obj_1`, `obj_2`, ... in the Blender file.
