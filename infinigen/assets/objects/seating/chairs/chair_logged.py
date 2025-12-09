@@ -1,8 +1,11 @@
 import bpy
 import numpy as np
 from numpy.random import uniform
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+import sys
 
+sys.path.append("./")
+sys.path.append("../")
 # Import modules (not names) so we can wrap low-level calls
 from infinigen.assets.composition import material_assignments
 from infinigen.assets.utils import decorate as deco
@@ -132,6 +135,45 @@ class _SanitizedLogger:
 
 
 SCRIPT_LOGGER = _SanitizedLogger()
+
+
+class _RefactoredLogger:
+    """Logger for producing refactored-style output (helper calls only).
+
+    Produces a main script that calls high-level helpers with explicit parameters,
+    suitable for comparison with the evaluator's refactored script format.
+    """
+
+    def __init__(self):
+        self.lines: List[str] = []
+
+    def reset(self):
+        self.lines.clear()
+
+    def write(self, s: str):
+        self.lines.append(s)
+
+    def log_call(self, helper_name: str, result_var: str, **kwargs):
+        """Log a helper function call."""
+        args_parts = []
+        for k, v in kwargs.items():
+            if isinstance(v, bool):
+                args_parts.append(f"{k}={v}")
+            elif isinstance(v, str):
+                args_parts.append(f'{k}="{v}"')
+            elif isinstance(v, (int, float)):
+                args_parts.append(f"{k}={v}")
+            elif isinstance(v, (list, tuple)):
+                args_parts.append(f"{k}={list(v)}")
+            elif isinstance(v, np.ndarray):
+                args_parts.append(f"{k}={v.tolist()}")
+            else:
+                args_parts.append(f"{k}={repr(v)}")
+        args_str = ", ".join(args_parts)
+        self.write(f"{result_var} = {helper_name}({args_str})")
+
+
+REFACTORED_LOGGER = _RefactoredLogger()
 
 
 # Wrappers for low-level functions (create or mutate) to record constant calls
@@ -853,4 +895,295 @@ class ChairFactoryLogged(AssetFactory):
             f.write("objs = []\n\n")
             for line in SCRIPT_LOGGER.lines:
                 f.write(line + "\n")
+        return output_path
+
+    def export_refactored_script(self, output_path: str) -> str:
+        """Export a refactored-style script showing helper calls with inline values.
+
+        This produces a main script with inline parameter values (not declarations),
+        suitable for fair LOC comparison with primitive scripts.
+        """
+        p = self._get_params_dict()
+
+        def fmt(v):
+            if isinstance(v, bool):
+                return str(v)
+            elif isinstance(v, str):
+                return f'"{v}"'
+            elif isinstance(v, (list, tuple)):
+                return str(list(v))
+            return str(v)
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("import bpy\n")
+            f.write("import numpy as np\n")
+            f.write("from codebank import (\n")
+            f.write("    make_seat, make_legs, make_backs,\n")
+            f.write("    make_leg_decors, make_back_decors, make_arms,\n")
+            f.write("    solidify_limb, finalize_parts,\n")
+            f.write(")\n\n")
+
+            # Main script with inline values
+            f.write("parts = []\n")
+            f.write(
+                f"seat = make_seat({fmt(p['width'])}, {fmt(p['size'])}, {fmt(p['thickness'])}, {fmt(p['bevel_width'])}, {fmt(p['seat_back'])}, {fmt(p['seat_mid'])}, {fmt(p['seat_mid_x'])}, {fmt(p['seat_mid_z'])}, {fmt(p['seat_front'])}, {fmt(p['is_seat_round'])}, {fmt(p['is_seat_subsurf'])})\n"
+            )
+            f.write("parts.append(seat)\n")
+            f.write(
+                f"legs = make_legs({fmt(p['width'])}, {fmt(p['size'])}, {fmt(p['seat_back'])}, {fmt(p['leg_x_offset'])}, {fmt(p['leg_y_offset'])}, {fmt(p['leg_height'])}, {fmt(p['leg_type'])}, {fmt(p['limb_profile'])}, {fmt(p['leg_thickness'])})\n"
+            )
+            f.write("parts.extend(legs)\n")
+            f.write(
+                f"backs = make_backs({fmt(p['width'])}, {fmt(p['seat_back'])}, {fmt(p['back_x_offset'])}, {fmt(p['back_y_offset'])}, {fmt(p['back_height'])}, {fmt(p['leg_type'])}, {fmt(p['limb_profile'])}, {fmt(p['leg_thickness'])}, {fmt(p['size'])})\n"
+            )
+            f.write("parts.extend(backs)\n")
+            f.write(
+                f"leg_decors = make_leg_decors(legs, {fmt(p['has_leg_x_bar'])}, {fmt(p['has_leg_y_bar'])}, {fmt(p['leg_height'])}, {fmt(p['leg_offset_bar'])}, {fmt(p['leg_thickness'])}, {fmt(p['is_leg_round'])}, {fmt(p['bevel_width'])})\n"
+            )
+            f.write("parts.extend(leg_decors)\n")
+            if p["has_arm"]:
+                f.write(
+                    f"arms = make_arms(seat, backs, {fmt(p['arm_thickness'])}, {fmt(p['arm_height'])}, {fmt(p['arm_y'])}, {fmt(p['arm_z'])}, {fmt(p['arm_mid'])}, {fmt(p['arm_profile'])}, {fmt(p['is_leg_round'])}, {fmt(p['bevel_width'])})\n"
+                )
+                f.write("parts.extend(arms)\n")
+            f.write(
+                f"back_decors = make_back_decors(backs, {fmt(p['back_thickness'])}, {fmt(p['thickness'])}, {fmt(p['back_profile'])}, {fmt(p['back_height'])}, {fmt(p['back_type'])}, {fmt(p['back_vertical_cuts'])}, {fmt(p['back_partial_scale'])}, {fmt(p['bevel_width'])}, {fmt(p['is_leg_round'])})\n"
+            )
+            f.write("parts.extend(back_decors)\n")
+            f.write("for leg in legs:\n")
+            f.write(
+                f"    solidify_limb(leg, 2, {fmt(p['leg_thickness'])}, {fmt(p['is_leg_round'])}, {fmt(p['bevel_width'])})\n"
+            )
+            f.write("for back in backs:\n")
+            f.write(
+                f"    solidify_limb(back, 2, {fmt(p['back_thickness'])}, {fmt(p['is_leg_round'])}, {fmt(p['bevel_width'])})\n"
+            )
+            f.write("finalize_parts(parts)\n")
+
+        return output_path
+
+    def _get_params_dict(self) -> Dict[str, Any]:
+        """Get all parameters as a dictionary."""
+        return {
+            "width": float(self.width),
+            "size": float(self.size),
+            "thickness": float(self.thickness),
+            "bevel_width": float(self.bevel_width),
+            "seat_back": float(self.seat_back),
+            "seat_mid": float(self.seat_mid),
+            "seat_mid_x": float(self.seat_mid_x),
+            "seat_mid_z": float(self.seat_mid_z),
+            "seat_front": float(self.seat_front),
+            "is_seat_round": bool(self.is_seat_round),
+            "is_seat_subsurf": bool(self.is_seat_subsurf),
+            "leg_thickness": float(self.leg_thickness),
+            "limb_profile": float(self.limb_profile),
+            "leg_height": float(self.leg_height),
+            "is_leg_round": bool(self.is_leg_round),
+            "leg_type": str(self.leg_type),
+            "leg_x_offset": float(self.leg_x_offset),
+            "leg_y_offset": (float(self.leg_y_offset[0]), float(self.leg_y_offset[1])),
+            "back_height": float(self.back_height),
+            "back_thickness": float(self.back_thickness),
+            "back_x_offset": float(self.back_x_offset),
+            "back_y_offset": float(self.back_y_offset),
+            "back_type": str(self.back_type),
+            "back_profile": [(float(p[0]), float(p[1])) for p in self.back_profile],
+            "back_vertical_cuts": int(self.back_vertical_cuts),
+            "back_partial_scale": float(self.back_partial_scale),
+            "has_leg_x_bar": bool(self.has_leg_x_bar),
+            "has_leg_y_bar": bool(self.has_leg_y_bar),
+            "leg_offset_bar": (
+                float(self.leg_offset_bar[0]),
+                float(self.leg_offset_bar[1]),
+            ),
+            "has_arm": bool(self.has_arm),
+            "arm_thickness": float(self.arm_thickness),
+            "arm_height": float(self.arm_height),
+            "arm_y": float(self.arm_y),
+            "arm_z": float(self.arm_z),
+            "arm_mid": [float(x) for x in self.arm_mid],
+            "arm_profile": [float(x) for x in self.arm_profile],
+        }
+
+    def export_parametric_script(self, output_path: str) -> str:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("import bpy\n")
+            f.write("import numpy as np\n")
+            f.write(
+                "from infinigen.assets.utils.decorate import write_attribute, write_co, remove_edges, remove_vertices, select_edges, solidify, subsurf\n"
+            )
+            f.write(
+                "from infinigen.assets.utils.draw import bezier_curve, align_bezier\n"
+            )
+            f.write(
+                "from infinigen.assets.utils.object import join_objects, new_bbox\n"
+            )
+            f.write("from infinigen.assets.utils.nodegroup import geo_radius\n")
+            f.write("from infinigen.core.util import blender as butil\n\n")
+            # Parameter block (captured from this factory instance)
+            params = {
+                "width": float(self.width),
+                "size": float(self.size),
+                "thickness": float(self.thickness),
+                "bevel_width": float(self.bevel_width),
+                "seat_back": float(self.seat_back),
+                "seat_mid": float(self.seat_mid),
+                "seat_mid_x": float(self.seat_mid_x),
+                "seat_mid_z": float(self.seat_mid_z),
+                "seat_front": float(self.seat_front),
+                "is_seat_round": bool(self.is_seat_round),
+                "is_seat_subsurf": bool(self.is_seat_subsurf),
+                "leg_thickness": float(self.leg_thickness),
+                "limb_profile": float(self.limb_profile),
+                "leg_height": float(self.leg_height),
+                "back_height": float(self.back_height),
+                "is_leg_round": bool(self.is_leg_round),
+                "leg_x_offset": float(self.leg_x_offset),
+                "back_x_offset": float(self.back_x_offset),
+                "back_y_offset": float(self.back_y_offset),
+                "has_leg_x_bar": bool(self.has_leg_x_bar),
+                "has_leg_y_bar": bool(self.has_leg_y_bar),
+                "has_arm": bool(self.has_arm),
+                "arm_thickness": float(self.arm_thickness),
+                "arm_y": float(self.arm_y),
+                "arm_z": float(self.arm_z),
+                "back_thickness": float(self.back_thickness),
+                "back_vertical_cuts": int(self.back_vertical_cuts),
+                "back_partial_scale": float(self.back_partial_scale),
+            }
+            # leg_y_offset and leg_offset_bar can be tuples
+            f.write("# Parameters\n")
+            for k, v in params.items():
+                if isinstance(v, bool):
+                    f.write(f"{k} = {str(v)}\n")
+                elif isinstance(v, (int, float)):
+                    f.write(f"{k} = {v}\n")
+                else:
+                    f.write(f"{k} = {repr(v)}\n")
+            f.write(
+                f"leg_y_offset = ({float(self.leg_y_offset[0])}, {float(self.leg_y_offset[1])})\n"
+            )
+            f.write(
+                f"leg_offset_bar = ({float(self.leg_offset_bar[0])}, {float(self.leg_offset_bar[1])})\n\n"
+            )
+            # Begin script body reconstructing key arrays before making low-level calls.
+            f.write("objs = []\n\n")
+            # Seat
+            f.write("# Seat\n")
+            f.write(
+                "x_anchors = np.array([0, 0.1, 1, seat_mid_x, seat_back, 0]) * width / 2\n"
+            )
+            f.write(
+                "y_anchors = np.array([-seat_front, -seat_front, -1, -seat_mid, 0, 0]) * size\n"
+            )
+            f.write("z_anchors = np.array([0, 0, 0, seat_mid_z, 0, 0]) * thickness\n")
+            f.write("vector_locations = [4] if is_seat_round else [2, 4]\n")
+            f.write(
+                "obj = bezier_curve((x_anchors, y_anchors, z_anchors), vector_locations)\n"
+            )
+            f.write('obj.name = "obj_1"\nobjs.append(bpy.data.objects["obj_1"])\n')
+            f.write(
+                "butil.modify_mesh(bpy.data.objects['obj_1'], 'WELD', merge_threshold=0.001)\n"
+            )
+            f.write("butil.modify_mesh(bpy.data.objects['obj_1'], 'MIRROR')\n")
+            f.write('with butil.ViewportMode(bpy.data.objects["obj_1"], "EDIT"):\n')
+            f.write('    bpy.ops.mesh.select_all(action="SELECT")\n')
+            f.write("    bpy.ops.mesh.fill_grid(use_interp_simple=True)\n")
+            f.write(
+                "butil.modify_mesh(bpy.data.objects['obj_1'], 'SOLIDIFY', thickness=thickness, offset=0)\n"
+            )
+            f.write("subsurf(bpy.data.objects['obj_1'], 1, not is_seat_subsurf)\n")
+            f.write(
+                "butil.modify_mesh(bpy.data.objects['obj_1'], 'SUBSURF', levels=1, render_levels=1, subdivision_type='CATMULL_CLARK')\n"
+            )
+            f.write(
+                "butil.modify_mesh(bpy.data.objects['obj_1'], 'BEVEL', width=bevel_width, segments=8)\n\n"
+            )
+
+            # Legs
+            f.write("# Legs\n")
+            f.write(
+                "leg_starts = np.array([[-seat_back, 0, 0], [-1, -1, 0], [1, -1, 0], [seat_back, 0, 0]]) * np.array([[width/2, size, 0]])\n"
+            )
+            f.write("leg_ends = leg_starts.copy()\n")
+            f.write("leg_ends[[0,1],0] -= leg_x_offset\n")
+            f.write("leg_ends[[2,3],0] += leg_x_offset\n")
+            f.write("leg_ends[[0,3],1] += leg_y_offset[0]\n")
+            f.write("leg_ends[[1,2],1] -= leg_y_offset[1]\n")
+            f.write("leg_ends[:,2] = -leg_height\n")
+            f.write("def limb_axes_scale(leg_type, limb_profile):\n")
+            f.write("    if leg_type == 'up-curved':\n")
+            f.write("        return [(0,0,1), None], [limb_profile, 1]\n")
+            f.write("    if leg_type == 'down-curved':\n")
+            f.write("        return [None, (0,0,1)], [1, limb_profile]\n")
+            f.write("    return None, None\n")
+            f.write(
+                "axes, scale = limb_axes_scale('up-curved' if False else 'down-curved' if False else 'straight', limb_profile)\n"
+            )
+            f.write("# Emit four limbs\n")
+            f.write("objs_idx = 2\n")
+            f.write("for i in range(4):\n")
+            f.write("    start = leg_starts[i]\n")
+            f.write("    end = leg_ends[i]\n")
+            f.write("    obj = align_bezier(np.stack([start, end], -1), axes, scale)\n")
+            f.write("    sx = 1 if start[0] < 0 else -1\n")
+            f.write("    sy = 1 if start[1] < -size/2 else -1\n")
+            f.write('    obj.name = f"obj_{objs_idx}"\n')
+            f.write("    objs.append(bpy.data.objects[obj.name])\n")
+            f.write(
+                "    butil.modify_mesh(bpy.data.objects[obj.name], 'WELD', merge_threshold=0.001)\n"
+            )
+            f.write(
+                "    bpy.data.objects[obj.name].location = np.array([sx, sy, 0]) * leg_thickness / 2\n"
+            )
+            f.write("    butil.apply_transform(bpy.data.objects[obj.name], True)\n")
+            f.write("    if is_leg_round:\n")
+            f.write("        solidify(bpy.data.objects[obj.name], 2, leg_thickness)\n")
+            f.write(
+                "        butil.modify_mesh(bpy.data.objects[obj.name], 'BEVEL', width=bevel_width, segments=8)\n"
+            )
+            f.write("    else:\n")
+            f.write("        from infinigen.core import surface\n")
+            f.write(
+                "        surface.add_geomod(bpy.data.objects[obj.name], geo_radius, apply=True, input_args=[leg_thickness/2, 32], input_kwargs={})\n"
+            )
+            f.write("    objs_idx += 1\n\n")
+
+            # Backs\n"
+            f.write("# Backs\n")
+            f.write(
+                "back_starts = np.array([[-seat_back, 0, 0], [seat_back, 0, 0]]) * width / 2\n"
+            )
+            f.write("back_ends = back_starts.copy()\n")
+            f.write("back_ends[:,0] += np.array([back_x_offset, -back_x_offset])\n")
+            f.write("back_ends[:,1] = back_y_offset\n")
+            f.write("back_ends[:,2] = back_height\n")
+            f.write("for i in range(2):\n")
+            f.write(
+                "    obj = align_bezier(np.stack([back_starts[i], back_ends[i]], -1), None, None)\n"
+            )
+            f.write('    obj.name = f"obj_{objs_idx}"\n')
+            f.write("    objs.append(bpy.data.objects[obj.name])\n")
+            f.write(
+                "    butil.modify_mesh(bpy.data.objects[obj.name], 'WELD', merge_threshold=0.001)\n"
+            )
+            f.write("    # solidify backs\n")
+            f.write("    if is_leg_round:\n")
+            f.write("        solidify(bpy.data.objects[obj.name], 2, back_thickness)\n")
+            f.write("    else:\n")
+            f.write("        from infinigen.core import surface\n")
+            f.write(
+                "        surface.add_geomod(bpy.data.objects[obj.name], geo_radius, apply=True, input_args=[back_thickness/2, 32], input_kwargs={})\n"
+            )
+            f.write("    objs_idx += 1\n\n")
+
+            # Final rotation/apply transforms per-part (equivalent to factory's finalization)\n"
+            f.write("# Final rotation/apply transforms\n")
+            f.write("for o in objs:\n")
+            f.write(
+                "    bpy.data.objects[o.name].rotation_euler.z += 1.5707963267948966\n"
+            )
+            f.write("    butil.apply_transform(bpy.data.objects[o.name])\n")
+            f.write("\n")
         return output_path

@@ -128,6 +128,54 @@ Implementation guidance:
 - Keep parts separate and name in creation order.
 - Omit materials or replace with fully constant assignments if needed.
 
+## Refactored exporter (helper-call format)
+
+In addition to fully flattened “sanitized” scripts, the logged variant can also emit a “refactored” script that preserves dependency structure at the helper level. This is useful for evaluating program recovery or comparing line counts with a higher-level representation.
+
+### Goals
+- Represent the build using a small set of semantic helper calls (e.g., `make_seat`, `make_legs`, `make_backs`, `make_leg_decors`, `make_back_decors`, `make_arms`, `solidify_limb`, `finalize_parts`), rather than enumerating every low-level operation.
+- Keep all arguments as inlined constant values (no randomness or factory dependencies at runtime).
+- Produce a minimal “main program” that constructs the object in a few, readable calls.
+
+### Implementation summary (as in `chair_logged.py`)
+- A dedicated exporter (e.g., `export_refactored_script(path)`) writes:
+  - Imports for a small “codebank” of helper functions:
+    ```
+    from codebank import (
+        make_seat, make_legs, make_backs,
+        make_leg_decors, make_back_decors, make_arms,
+        solidify_limb, finalize_parts,
+    )
+    ```
+  - A short main program:
+    - `parts = []`
+    - `seat = make_seat(width, size, thickness, bevel_width, seat_back, seat_mid, seat_mid_x, seat_mid_z, seat_front, is_seat_round, is_seat_subsurf)`
+    - `legs = make_legs(width, size, seat_back, leg_x_offset, leg_y_offset, leg_height, leg_type, limb_profile, leg_thickness)`
+    - `backs = make_backs(width, seat_back, back_x_offset, back_y_offset, back_height, leg_type, limb_profile, leg_thickness, size)`
+    - `leg_decors = make_leg_decors(legs, has_leg_x_bar, has_leg_y_bar, leg_height, leg_offset_bar, leg_thickness, is_leg_round, bevel_width)`
+    - `back_decors = make_back_decors(backs, back_thickness, thickness, back_profile, back_height, back_type, back_vertical_cuts, back_partial_scale, bevel_width, is_leg_round)`
+    - `if has_arm: arms = make_arms(...)`
+    - `solidify_limb(...)` over legs/backs
+    - `finalize_parts(parts)`
+- All inputs are constants captured from the realized factory instance; no variables or random utilities are introduced at runtime.
+
+### Conventions
+- File suffix: `_refactored.py` (or `prog_gold_blender.py`/`prog_pred_blender.py` if aligning with an external evaluator).
+- The refactored script:
+  - Must import only the helper API (“codebank”), plus standard Blender/numpy imports as needed.
+  - Must keep arguments as inlined literals (numbers/tuples/lists) for determinism.
+  - Should build a `parts` list and pass it to `finalize_parts(parts)` (or equivalent) to apply any final per-part transforms.
+  - Should not reference factories or high-level placement/sampling utilities.
+  - May remain dematerialized (no material generators) to minimize dependencies.
+
+### Applying the refactored exporter to other generators
+- Identify a compact set of semantic helper functions that cover the generator’s major steps (e.g., seat/table-top, legs, connectors, decors, finalize).
+- During logging, collect the concrete values for the parameters those helpers need (sizes, offsets, profiles, flags).
+- Implement `export_refactored_script` to emit:
+  - A constant parameter block or directly inline constants in the helper calls.
+  - A short main script calling the chosen helpers and aggregating results in a parts list.
+- Ensure the refactored script produces geometry equivalent to the flattened sanitized version (compare vertex/face counts, bbox, and visual appearance).
+
 ## Naming rules inside sanitized scripts
 - Variables: only neutral names like `obj`, `objs`, `p1`, `p2`, `v1`, `v2`, `data`.
 - Objects in Blender: assign `obj.name = "obj_k"` in deterministic order.
