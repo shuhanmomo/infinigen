@@ -75,11 +75,6 @@ assert OBJECTS_PATH.exists(), OBJECTS_PATH
 
 
 def unified_asset_import(name):
-    try:
-        return import_item(name), name.split(".")[-1]
-    except Exception:
-        pass
-
     """Unified import function using test lists."""
     test_lists = {
         "scatter": "tests/assets/list_scatters.txt",
@@ -94,6 +89,23 @@ def unified_asset_import(name):
         for asset_type, path in test_lists.items()
         for asset in load_txt_list(infinigen.repo_root() / path)
     ]
+    by_full_path = {asset: atype for asset, atype in all_assets}
+
+    try:
+        imported = import_item(name)
+        # Fully-qualified asset path provided: use list-based category.
+        if name in by_full_path:
+            return imported, by_full_path[name]
+
+        # Fallback for direct imports by class name/module alias.
+        class_name = name.split(".")[-1]
+        class_matches = [atype for asset, atype in all_assets if asset.split(".")[-1] == class_name]
+        if len(class_matches) == 1:
+            return imported, class_matches[0]
+
+        return imported, "object"
+    except Exception:
+        pass
 
     # Check exact match first
     exact = next((asset for asset, atype in all_assets if asset == name), None)

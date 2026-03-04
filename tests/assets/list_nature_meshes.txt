@@ -106,3 +106,4 @@ infinigen.assets.objects.tropic_plants.LeafBananaTreeFactory
 infinigen.assets.objects.tropic_plants.PlantBananaTreeFactory
 infinigen.assets.objects.underwater.SeaweedFactory
 infinigen.assets.objects.underwater.UrchinFactory
+infinigen.assets.building_facade.BuildingFacadeFactory

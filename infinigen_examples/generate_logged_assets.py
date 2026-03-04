@@ -12,12 +12,20 @@ from infinigen.core import init
 from infinigen.core.util import blender as butil
 from infinigen.core.util.math import FixedSeed
 
-# Import the logged chair factory
+# Logged factories
+from infinigen.assets.building_facade_logged import BuildingFacadeFactoryLogged
 from infinigen.assets.objects.seating.chairs.chair_logged import ChairFactoryLogged
 
 
 def make_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--factory",
+        type=str,
+        default="chair",
+        choices=["chair", "building_facade"],
+        help="Which logged factory to run",
+    )
     parser.add_argument("--seeds", type=int, nargs="*", default=[41, 42])
     parser.add_argument(
         "--start_seed", type=int, default=None, help="Start seed for range generation"
@@ -28,7 +36,7 @@ def make_args():
         default=0,
         help="Number of sequential variants to generate from start_seed",
     )
-    parser.add_argument("--output_root", type=Path, default=Path("outputs/chairs"))
+    parser.add_argument("--output_root", type=Path, default=None)
     parser.add_argument("--resolution", type=str, default="1024x1024")
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--save_blend", action="store_true")
@@ -43,6 +51,14 @@ def make_args():
     return init.parse_args_blender(parser)
 
 
+def _factory_spec(factory_name: str):
+    if factory_name == "chair":
+        return ChairFactoryLogged, "chair_sanitized.py", True
+    if factory_name == "building_facade":
+        return BuildingFacadeFactoryLogged, "building_facade_sanitized.py", False
+    raise ValueError(f"Unsupported factory {factory_name}")
+
+
 def generate_one(seed: int, output_root: Path):
     # Prepare scene per variant
     butil.clear_scene()
@@ -53,8 +69,10 @@ def generate_one(seed: int, output_root: Path):
     out_dir = output_root / f"variant_{seed:03d}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    factory_cls, script_name, supports_refactored = _factory_spec(ARGS.factory)
+
     # Generate asset
-    fac = ChairFactoryLogged(seed)
+    fac = factory_cls(seed)
     with FixedSeed(seed):
         parent = fac.spawn_asset(seed)
 
@@ -65,12 +83,12 @@ def generate_one(seed: int, output_root: Path):
 
     # Export sanitized script if requested
     if ARGS.export_script:
-        script_path = out_dir / "Chair_sanitized.py"
+        script_path = out_dir / script_name
         fac.export_sanitized_script(str(script_path))
         print(f"Saved: {script_path}")
 
     # Export refactored script for evaluator comparison
-    if ARGS.export_refactored:
+    if ARGS.export_refactored and supports_refactored:
         # Create evaluator-compatible structure: variant_{idx}/{subdir}/prog_*.py
         # prog_gold_blender.py = primitive script (sanitized)
         # prog_pred_blender.py = refactored script (helper calls)
@@ -87,6 +105,10 @@ def generate_one(seed: int, output_root: Path):
         # Export refactored as pred
         fac.export_refactored_script(str(pred_path))
         print(f"Saved: {pred_path}")
+    elif ARGS.export_refactored and not supports_refactored:
+        print(
+            f"Skipping --export_refactored for {ARGS.factory}: refactored export not implemented."
+        )
 
     if ARGS.save_blend:
         print(f"Saved: {blend_path}")
@@ -324,6 +346,13 @@ def finalize_parts(parts):
 
 
 def main(args):
+    if args.output_root is None:
+        args.output_root = (
+            Path("outputs/chairs")
+            if args.factory == "chair"
+            else Path("outputs/building_facade_logged")
+        )
+
     # Load gin configs so blender/cycles configuration has required parameters
     init.apply_gin_configs(
         ["infinigen_examples/configs_indoor", "infinigen_examples/configs_nature"],
