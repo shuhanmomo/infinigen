@@ -76,6 +76,11 @@ def generate_one(seed: int, output_root: Path):
     with FixedSeed(seed):
         parent = fac.spawn_asset(seed)
 
+    # Write object-name-to-label mapping
+    if hasattr(fac, "write_obj_to_label"):
+        label_path = fac.write_obj_to_label(str(out_dir))
+        print(f"Saved: {label_path}")
+
     # Save .blend if requested
     blend_path = out_dir / "scene.blend"
     if ARGS.save_blend:

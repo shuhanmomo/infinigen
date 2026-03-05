@@ -1,35 +1,59 @@
+import json
+import os
+
+import bpy
 import numpy as np
 
-from infinigen.assets.utils.object import join_objects, new_bbox
+from infinigen.assets.utils.object import new_bbox
 from infinigen.core.placement.factory import AssetFactory
+from infinigen.core.util.math import FixedSeed
 
 
 class BuildingFacadeFactoryLogged(AssetFactory):
     """Logged facade generator that preserves semantic layers.
 
-    Differences from sanitized object-level generators:
-    - Keep semantic labels (wall/window/door/roof) as object names + custom attrs.
-    - Group same semantic type into one scene object.
+    Each window / door / wall / roof is kept as its own Blender object with a
+    unique name (e.g. ``window_03``).  The name-to-label mapping is stored in
+    ``_obj_to_label`` and can be written to ``obj_to_label.json`` via
+    :meth:`write_obj_to_label`.
     """
 
     def __init__(self, factory_seed, coarse=False):
         super().__init__(factory_seed=factory_seed, coarse=coarse)
-        self.ground_h = 4.0
-        self.floor_h = 3.5
-        self.height = 11.0
-        self.tile_w = 4.0
-        self.side_margin = 0.5
+        with FixedSeed(factory_seed):
+            self.ground_h = np.random.uniform(3.5, 5.0)
+            self.floor_h = np.random.uniform(3.0, 4.0)
+            self.height = np.random.uniform(8.0, 16.0)
+            self.tile_w = np.random.uniform(3.0, 5.0)
+            self.side_margin = np.random.uniform(0.3, 0.8)
 
-        self.door_h = 2.6
-        self.door_w = 1.8
-        self.sill = 1.0
-        self.win_h = 1.8
-        self.opening_protrusion = 0.08
+            self.door_h = np.random.uniform(2.4, 3.0)
+            self.door_w = np.random.uniform(1.4, 2.2)
+            self.sill = np.random.uniform(0.8, 1.2)
+            self.win_h = np.random.uniform(1.4, 2.2)
+            self.opening_protrusion = np.random.uniform(0.05, 0.12)
 
-        self.depth = 0.25
-        self.roof_thickness = 0.3
+            self.depth = np.random.uniform(0.2, 0.35)
+            self.roof_thickness = np.random.uniform(0.2, 0.4)
 
+        self._obj_to_label = {}
+        self._label_counters = {}
         self._semantic_specs = None
+
+    # ------------------------------------------------------------------
+    # Naming helpers
+    # ------------------------------------------------------------------
+
+    def _next_name(self, label):
+        idx = self._label_counters.get(label, 0)
+        self._label_counters[label] = idx + 1
+        name = f"{label}_{idx:02d}"
+        self._obj_to_label[name] = label
+        return name
+
+    # ------------------------------------------------------------------
+    # Geometry helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _valid_extent(a, b, eps=1e-6):
@@ -48,18 +72,37 @@ class BuildingFacadeFactoryLogged(AssetFactory):
         return xr + tx, yr + ty
 
     def _transform_bounds(self, x0, x1, y0, y1, rot_k, tx, ty):
-        pts = [
+        corners = [
             self._transform_xy(x0, y0, rot_k, tx, ty),
             self._transform_xy(x0, y1, rot_k, tx, ty),
             self._transform_xy(x1, y0, rot_k, tx, ty),
             self._transform_xy(x1, y1, rot_k, tx, ty),
         ]
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
+        xs = [c[0] for c in corners]
+        ys = [c[1] for c in corners]
         return min(xs), max(xs), min(ys), max(ys)
 
-    def _new_bucket(self):
-        return {"wall": [], "window": [], "door": [], "roof": []}
+    def _add_named_box(self, parts, specs, label, x0, x1, y0, y1, z0, z1,
+                       rot_k=0, tx=0.0, ty=0.0):
+        if not (
+            self._valid_extent(x0, x1)
+            and self._valid_extent(y0, y1)
+            and self._valid_extent(z0, z1)
+        ):
+            return
+        wx0, wx1, wy0, wy1 = self._transform_bounds(
+            x0, x1, y0, y1, rot_k, tx, ty,
+        )
+        obj = new_bbox(wx0, wx1, wy0, wy1, z0, z1)
+        name = self._next_name(label)
+        obj.name = name
+        obj["semantic_type"] = label
+        parts.append(obj)
+        specs.setdefault(label, []).append((wx0, wx1, wy0, wy1, z0, z1))
+
+    # ------------------------------------------------------------------
+    # Vertical / horizontal partitioning
+    # ------------------------------------------------------------------
 
     def _vertical_partition(self):
         floors = []
@@ -81,64 +124,30 @@ class BuildingFacadeFactoryLogged(AssetFactory):
         bay_w = span / n_bays
         return [(start + i * bay_w, start + (i + 1) * bay_w) for i in range(n_bays)]
 
-    def _add_box(
-        self,
-        bucket,
-        specs,
-        semantic,
-        x0,
-        x1,
-        y0,
-        y1,
-        z0,
-        z1,
-        rot_k,
-        tx,
-        ty,
-    ):
-        if not (
-            self._valid_extent(x0, x1)
-            and self._valid_extent(y0, y1)
-            and self._valid_extent(z0, z1)
-        ):
-            return
+    # ------------------------------------------------------------------
+    # Bay placement
+    # ------------------------------------------------------------------
 
-        wx0, wx1, wy0, wy1 = self._transform_bounds(x0, x1, y0, y1, rot_k, tx, ty)
-        obj = new_bbox(wx0, wx1, wy0, wy1, z0, z1)
-        bucket[semantic].append(obj)
-        specs[semantic].append((wx0, wx1, wy0, wy1, z0, z1))
-
-    def _place_window_bay(self, bucket, specs, bay_x, band_z, y0, y1, t):
+    def _place_window(self, parts, specs, bay_x, band_z, y0, y1, transform):
         bx0, bx1 = bay_x
         z0, z1 = band_z
         bw = bx1 - bx0
         pad = min(0.45, 0.2 * bw)
-
-        wx0 = bx0 + pad
-        wx1 = bx1 - pad
+        wx0, wx1 = bx0 + pad, bx1 - pad
         wz0 = z0 + self.sill
         wz1 = min(wz0 + self.win_h, z1 - 0.05)
 
-        rot_k, tx, ty = t
         if not (self._valid_extent(wx0, wx1) and self._valid_extent(wz0, wz1)):
             return
 
-        self._add_box(
-            bucket,
-            specs,
-            "window",
-            wx0,
-            wx1,
-            y0 - self.opening_protrusion,
-            y1 + self.opening_protrusion,
-            wz0,
-            wz1,
-            rot_k,
-            tx,
-            ty,
+        rot_k, tx, ty = transform
+        self._add_named_box(
+            parts, specs, "window", wx0, wx1,
+            y0 - self.opening_protrusion, y1 + self.opening_protrusion,
+            wz0, wz1, rot_k, tx, ty,
         )
 
-    def _place_entrance_bay(self, bucket, specs, bay_x, band_z, y0, y1, t):
+    def _place_door(self, parts, specs, bay_x, band_z, y0, y1, transform):
         bx0, bx1 = bay_x
         z0, z1 = band_z
         bw = bx1 - bx0
@@ -148,151 +157,84 @@ class BuildingFacadeFactoryLogged(AssetFactory):
         dx1 = min(bx1, cx + door_w / 2.0)
         dz1 = min(z0 + self.door_h, z1)
 
-        rot_k, tx, ty = t
-        self._add_box(
-            bucket,
-            specs,
-            "door",
-            dx0,
-            dx1,
-            y0 - self.opening_protrusion,
-            y1 + self.opening_protrusion,
-            z0,
-            dz1,
-            rot_k,
-            tx,
-            ty,
+        rot_k, tx, ty = transform
+        self._add_named_box(
+            parts, specs, "door", dx0, dx1,
+            y0 - self.opening_protrusion, y1 + self.opening_protrusion,
+            z0, dz1, rot_k, tx, ty,
         )
 
-    def _typical_floor_band(self, bucket, specs, width, band_z, y0, y1, t):
-        bays = self._repeat_to_fill(self.side_margin, width - self.side_margin, self.tile_w)
-        for bay in bays:
-            self._place_window_bay(bucket, specs, bay, band_z, y0, y1, t)
-
-    def _ground_floor_band(self, bucket, specs, width, band_z, y0, y1, t):
-        bays = self._repeat_to_fill(self.side_margin, width - self.side_margin, self.tile_w)
-        if not bays:
-            span0 = self.side_margin
-            span1 = max(self.side_margin, width - self.side_margin)
-            if self._valid_extent(span0, span1):
-                self._place_entrance_bay(bucket, specs, (span0, span1), band_z, y0, y1, t)
-            return
-
-        for bay in bays[:-1]:
-            self._place_window_bay(bucket, specs, bay, band_z, y0, y1, t)
-        self._place_entrance_bay(bucket, specs, bays[-1], band_z, y0, y1, t)
-
-    def _build_single_facade(self, bucket, specs, width, kind, y0, y1, transform):
+    def _build_facade(self, parts, specs, width, kind, y0, y1, transform):
         floors = self._vertical_partition()
         for i, band_z in enumerate(floors):
+            bays = self._repeat_to_fill(
+                self.side_margin, width - self.side_margin, self.tile_w,
+            )
             if i == 0 and kind == "FRONT":
-                self._ground_floor_band(bucket, specs, width, band_z, y0, y1, transform)
+                if not bays:
+                    span0 = self.side_margin
+                    span1 = max(self.side_margin, width - self.side_margin)
+                    if self._valid_extent(span0, span1):
+                        self._place_door(
+                            parts, specs, (span0, span1),
+                            band_z, y0, y1, transform,
+                        )
+                    continue
+                for bay in bays[:-1]:
+                    self._place_window(
+                        parts, specs, bay, band_z, y0, y1, transform,
+                    )
+                self._place_door(
+                    parts, specs, bays[-1], band_z, y0, y1, transform,
+                )
             else:
-                self._typical_floor_band(bucket, specs, width, band_z, y0, y1, transform)
+                for bay in bays:
+                    self._place_window(
+                        parts, specs, bay, band_z, y0, y1, transform,
+                    )
+
+    # ------------------------------------------------------------------
+    # Asset creation
+    # ------------------------------------------------------------------
 
     def create_asset(self, **params):
+        self._obj_to_label = {}
+        self._label_counters = {}
+
         front_width = float(params.get("front_width", np.random.uniform(12.0, 22.0)))
         side_width = float(params.get("side_width", np.random.uniform(10.0, 18.0)))
 
-        bucket = self._new_bucket()
-        specs = {k: [] for k in bucket.keys()}
+        parts = []
+        specs = {}
 
-        # Four main walls (single slab per side).
-        self._add_box(
-            bucket, specs, "wall", 0.0, front_width, 0.0, self.depth, 0.0, self.height, 0, 0.0, 0.0
-        )
-        self._add_box(
-            bucket, specs, "wall", 0.0, front_width, 0.0, self.depth, 0.0, self.height, 2, front_width, side_width
-        )
-        self._add_box(
-            bucket, specs, "wall", 0.0, side_width, 0.0, self.depth, 0.0, self.height, 1, front_width, 0.0
-        )
-        self._add_box(
-            bucket, specs, "wall", 0.0, side_width, 0.0, self.depth, 0.0, self.height, 3, 0.0, side_width
-        )
+        facade_configs = [
+            (front_width, "FRONT", (0, 0.0, 0.0)),
+            (front_width, "SIDE", (2, front_width, side_width)),
+            (side_width, "SIDE", (1, front_width, 0.0)),
+            (side_width, "SIDE", (3, 0.0, side_width)),
+        ]
 
-        # FRONT facade
-        self._build_single_facade(
-            bucket=bucket,
-            specs=specs,
-            width=front_width,
-            kind="FRONT",
-            y0=0.0,
-            y1=self.depth,
-            transform=(0, 0.0, 0.0),
-        )
-
-        # BACK facade
-        self._build_single_facade(
-            bucket=bucket,
-            specs=specs,
-            width=front_width,
-            kind="SIDE",
-            y0=0.0,
-            y1=self.depth,
-            transform=(2, front_width, side_width),
-        )
-
-        # RIGHT facade
-        self._build_single_facade(
-            bucket=bucket,
-            specs=specs,
-            width=side_width,
-            kind="SIDE",
-            y0=0.0,
-            y1=self.depth,
-            transform=(1, front_width, 0.0),
-        )
-
-        # LEFT facade
-        self._build_single_facade(
-            bucket=bucket,
-            specs=specs,
-            width=side_width,
-            kind="SIDE",
-            y0=0.0,
-            y1=self.depth,
-            transform=(3, 0.0, side_width),
-        )
-
-        # Roof
-        roof = new_bbox(
-            0.0,
-            front_width,
-            0.0,
-            side_width,
-            self.height,
-            self.height + self.roof_thickness,
-        )
-        bucket["roof"].append(roof)
-        specs["roof"].append(
-            (
-                0.0,
-                front_width,
-                0.0,
-                side_width,
-                self.height,
-                self.height + self.roof_thickness,
+        for width, kind, transform in facade_configs:
+            rot_k, tx, ty = transform
+            self._add_named_box(
+                parts, specs, "wall",
+                0.0, width, 0.0, self.depth, 0.0, self.height,
+                rot_k, tx, ty,
             )
+            self._build_facade(
+                parts, specs, width, kind, 0.0, self.depth, transform,
+            )
+
+        self._add_named_box(
+            parts, specs, "roof",
+            0.0, front_width, 0.0, side_width,
+            self.height, self.height + self.roof_thickness,
         )
 
-        parent = None
-        grouped = {}
-        for semantic, objs in bucket.items():
-            if not objs:
-                continue
-            obj = join_objects(objs) if len(objs) > 1 else objs[0]
-            obj.name = f"facade_{semantic}"
-            obj["semantic_type"] = semantic
-            grouped[semantic] = obj
-
-        if grouped:
-            import bpy
-
-            parent = bpy.data.objects.new("building_facade_logged", None)
-            bpy.context.collection.objects.link(parent)
-            for o in grouped.values():
-                o.parent = parent
+        parent = bpy.data.objects.new("building_facade_logged", None)
+        bpy.context.collection.objects.link(parent)
+        for obj in parts:
+            obj.parent = parent
 
         self._semantic_specs = {
             "meta": {
@@ -309,49 +251,59 @@ class BuildingFacadeFactoryLogged(AssetFactory):
             "parts": specs,
         }
 
-        return parent if parent is not None else roof
+        return parent
+
+    # ------------------------------------------------------------------
+    # Export helpers
+    # ------------------------------------------------------------------
+
+    def write_obj_to_label(self, output_dir):
+        """Write obj_to_label.json mapping each object name to its semantic label."""
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(str(output_dir), "obj_to_label.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self._obj_to_label, f, indent=2)
+        return path
 
     def export_logged_script(self, output_path: str) -> str:
         if self._semantic_specs is None:
-            raise RuntimeError("No logged specs found. Run create_asset/spawn_asset first.")
+            raise RuntimeError(
+                "No logged specs found. Run create_asset / spawn_asset first."
+            )
 
         meta = self._semantic_specs["meta"]
         parts = self._semantic_specs["parts"]
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("import bpy\n")
-            f.write("from infinigen.assets.utils.object import join_objects, new_bbox\n\n")
-            f.write("# Logged facade script (semantic-preserving)\n")
-            f.write(f"# front_width={meta['front_width']:.6f}, side_width={meta['side_width']:.6f}\n\n")
-            f.write("grouped = {}\n\n")
+            f.write("from infinigen.assets.utils.object import new_bbox\n\n")
+            f.write("# Logged facade script (each element is its own object)\n")
+            f.write(
+                f"# front_width={meta['front_width']:.6f}, "
+                f"side_width={meta['side_width']:.6f}\n\n"
+            )
+            f.write(
+                'parent = bpy.data.objects.new("building_facade_logged", None)\n'
+            )
+            f.write("bpy.context.collection.objects.link(parent)\n\n")
 
+            counter = {}
             for semantic in ["wall", "window", "door", "roof"]:
-                f.write(f"# {semantic.upper()} parts\n")
-                f.write("objs = []\n")
-                for (x0, x1, y0, y1, z0, z1) in parts.get(semantic, []):
+                for bounds in parts.get(semantic, []):
+                    idx = counter.get(semantic, 0)
+                    counter[semantic] = idx + 1
+                    name = f"{semantic}_{idx:02d}"
+                    x0, x1, y0, y1, z0, z1 = bounds
                     f.write(
-                        "objs.append(new_bbox("
-                        f"{x0:.9f}, {x1:.9f}, {y0:.9f}, {y1:.9f}, {z0:.9f}, {z1:.9f}"
-                        "))\n"
+                        f"obj = new_bbox("
+                        f"{x0:.9f}, {x1:.9f}, {y0:.9f}, {y1:.9f}, "
+                        f"{z0:.9f}, {z1:.9f})\n"
                     )
-                f.write("if len(objs) > 1:\n")
-                f.write("    obj = join_objects(objs)\n")
-                f.write("elif len(objs) == 1:\n")
-                f.write("    obj = objs[0]\n")
-                f.write("else:\n")
-                f.write("    obj = None\n")
-                f.write("if obj is not None:\n")
-                f.write(f'    obj.name = "facade_{semantic}"\n')
-                f.write(f'    obj["semantic_type"] = "{semantic}"\n')
-                f.write(f'    grouped["{semantic}"] = obj\n\n')
-
-            f.write('parent = bpy.data.objects.new("building_facade_logged", None)\n')
-            f.write("bpy.context.collection.objects.link(parent)\n")
-            f.write("for o in grouped.values():\n")
-            f.write("    o.parent = parent\n")
+                    f.write(f'obj.name = "{name}"\n')
+                    f.write(f'obj["semantic_type"] = "{semantic}"\n')
+                    f.write("obj.parent = parent\n\n")
 
         return output_path
 
     def export_sanitized_script(self, output_path: str) -> str:
-        # Keep generate_logged_assets.py compatibility while preserving semantic layers.
         return self.export_logged_script(output_path)
