@@ -1,0 +1,746 @@
+{
+  "metadata": {
+    "title": "Infinigen API Reference",
+    "description": "Low-level helper functions used by primitive scripts (e.g., outputs/chairs/variant_041/Chair_primitive.py). Each entry lists purpose, inputs, outputs/return, side-effects, and notes for replay fidelity.",
+    "version": "1.2"
+  },
+  "general_notes": {
+    "replay_context": [
+      "Many operations require OBJECT vs EDIT mode and correct selection/active object. Sanitized scripts explicitly open EDIT blocks with ViewportMode and issue the ops in-order.",
+      "All parameters are constants; scripts rename objects in creation order (obj_1..obj_N) and reference them by stable names.",
+      "Dematerialized outputs: primitive scripts do not assign materials; geometry/attributes/modifiers are sufficient to reproduce shape."
+    ],
+    "script_notes": [
+      "All numeric parameters in primitive scripts are concrete constants (no symbolic values).",
+      "Object arguments are Blender bpy.types.Object references; in primitive code they appear as bpy.data.objects[\"obj_k\"].",
+      "Unless specified, functions mutate objects in-place and return either the modified object or None."
+    ],
+    "imports": [
+      "import bpy",
+      "import numpy as np",
+      "from infinigen.assets.utils.decorate import write_attribute, write_co, read_co, read_edge_center, read_edge_direction, remove_edges, remove_vertices, select_edges, solidify, subsurf",
+      "from infinigen.assets.utils.draw import bezier_curve, align_bezier",
+      "from infinigen.assets.utils.object import join_objects, new_bbox",
+      "from infinigen.assets.utils.nodegroup import geo_radius",
+      "from infinigen.core.util import blender as butil",
+      "from infinigen.core import surface",
+      "from infinigen.core.util.blender import deep_clone_obj"
+    ]
+  },
+  "modules": {
+    "infinigen.assets.utils.draw": {
+      "functions": [
+        {
+          "name": "bezier_curve",
+          "signature": "bezier_curve(anchors: tuple[np.ndarray | Sequence[float], np.ndarray | Sequence[float], np.ndarray | Sequence[float]], vector_locations: Sequence[int] = (), resolution: int | None = None, to_mesh: bool = True)",
+          "purpose": "Create a mesh from a 3D Bezier curve profile (seat outline, rails, etc.). Positional order matters: arg2 is vector_locations, arg3 is resolution.",
+          "inputs": [
+            {
+              "name": "anchors",
+              "type": "tuple of three numpy arrays",
+              "description": "Control points in object space (x, y, z)."
+            },
+            {
+              "name": "vector_locations",
+              "type": "list of indices",
+              "default": "()",
+              "description": "Indices where the curve uses vector handles (sharp transitions); empty means automatic. This is the second positional argument."
+            },
+            {
+              "name": "resolution",
+              "type": "int",
+              "default": "None",
+              "description": "Curve resolution (defaults to 12 if None). Must be an int; pass as the third positional argument or as a keyword, never as a list."
+            },
+            {
+              "name": "to_mesh",
+              "type": "bool",
+              "default": "True",
+              "description": "Whether to convert curve to mesh."
+            }
+          ],
+          "returns": "bpy.types.Object (MESH) created and linked to the active collection.",
+          "side_effects": [
+            "Links new object to scene",
+            "Object name assigned afterward by script"
+          ],
+          "notes": "Often followed by weld/mirror/solidify/subsurf and edit-mode grid fill.",
+          "implementation": "def bezier_curve(anchors, vector_locations=(), resolution=None, to_mesh=True):\n    n = [len(r) for r in anchors if isinstance(r, Sized)][0]\n    anchors = np.array(\n        [\n            np.array(r, dtype=float) if isinstance(r, Sized) else np.full(n, r)\n            for r in anchors\n        ]\n    )\n    bpy.ops.curve.primitive_bezier_curve_add(location=(0, 0, 0))\n    obj = bpy.context.active_object\n\n    if n > 2:\n        with butil.ViewportMode(obj, \"EDIT\"):\n            bpy.ops.curve.subdivide(number_cuts=n - 2)\n    points = obj.data.splines[0].bezier_points\n    for i in range(n):\n        points[i].co = anchors[:, i]\n    for i in range(n):\n        if i in vector_locations:\n            points[i].handle_left_type = \"VECTOR\"\n            points[i].handle_right_type = \"VECTOR\"\n        else:\n            points[i].handle_left_type = \"AUTO\"\n            points[i].handle_right_type = \"AUTO\"\n    obj.data.splines[0].resolution_u = resolution if resolution is not None else 12\n    if not to_mesh:\n        return obj\n    return curve2mesh(obj)"
+        },
+        {
+          "name": "align_bezier",
+          "signature": "align_bezier(anchors: np.ndarray, axes: Sequence[Sequence[float] | None] | None = None, scale: Sequence[float] | np.ndarray | None = None, vector_locations: Sequence[int] = (), resolution: int | None = None, to_mesh: bool = True)",
+          "purpose": "Generate a curved limb/back element by aligning a Bezier edge path between start/end points, with optional axis/scale profiles. Positional order matters: arg4 is vector_locations, arg5 is resolution.",
+          "inputs": [
+            {
+              "name": "anchors",
+              "type": "numpy array",
+              "description": "Shape (3, N) or equivalent describing positions along the limb."
+            },
+            {
+              "name": "axes",
+              "type": "list/array of direction vectors or None",
+              "default": "None",
+              "description": "Direction vectors or None to infer."
+            },
+            {
+              "name": "scale",
+              "type": "list/array or None",
+              "default": "None",
+              "description": "Profile scales along the path, or None."
+            },
+            {
+              "name": "vector_locations",
+              "type": "list",
+              "default": "()",
+              "description": "Indices where vector handles are used. This is the fourth positional argument."
+            },
+            {
+              "name": "resolution",
+              "type": "int",
+              "default": "None",
+              "description": "Curve resolution. Must be an int; this is the fifth positional argument or may be passed by keyword."
+            },
+            {
+              "name": "to_mesh",
+              "type": "bool",
+              "default": "True",
+              "description": "Whether to convert to mesh."
+            }
+          ],
+          "returns": "bpy.types.Object (MESH), linked to the scene.",
+          "side_effects": [
+            "Links new object",
+            "Scripts often set obj.location then apply transform"
+          ],
+          "notes": "Common for legs/backs/arms; typically followed by weld and radius/solidify.",
+          "implementation": "def align_bezier(\n    anchors, axes=None, scale=None, vector_locations=(), resolution=None, to_mesh=True\n):\n    obj = bezier_curve(anchors, vector_locations, resolution, False)\n    points = obj.data.splines[0].bezier_points\n    if scale is None:\n        scale = np.ones(2 * len(points) - 2)\n    if axes is None:\n        axes = [None] * len(points)\n    scale = [1, *scale, 1]\n    for i, p in enumerate(points):\n        a = axes[i]\n        if a is None:\n            continue\n        a = np.array(a)\n        p.handle_left_type = \"FREE\"\n        p.handle_right_type = \"FREE\"\n        proj_left = np.array(p.handle_left - p.co) @ a * a\n        p.handle_left = (\n            np.array(p.co)\n            + proj_left\n            / np.linalg.norm(proj_left)\n            * np.linalg.norm(p.handle_left - p.co)\n            * scale[2 * i]\n        )\n        proj_right = np.array(p.handle_right - p.co) @ a * a\n        p.handle_right = (\n            np.array(p.co)\n            + proj_right\n            / np.linalg.norm(proj_right)\n            * np.linalg.norm(p.handle_right - p.co)\n            * scale[2 * i + 1]\n        )\n    if not to_mesh:\n        return obj\n    return curve2mesh(obj)"
+        }
+      ]
+    },
+    "infinigen.assets.utils.decorate": {
+      "functions": [
+        {
+          "name": "write_attribute",
+          "signature": "write_attribute(obj: bpy.types.Object, value: int | float, name: str, domain: str = \"POINT\", data_type: str = \"FLOAT\")",
+          "purpose": "Write/ensure a mesh attribute with a constant value across a given domain (e.g., mark faces as \"limb\" or \"panel\").",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "Target MESH object."
+            },
+            {
+              "name": "value",
+              "type": "numeric or integer constant",
+              "description": "Constant value to write."
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "description": "Attribute name."
+            },
+            {
+              "name": "domain",
+              "type": "string",
+              "default": "\"POINT\"",
+              "description": "One of \"POINT\", \"EDGE\", \"FACE\"."
+            },
+            {
+              "name": "data_type",
+              "type": "string",
+              "default": "\"FLOAT\"",
+              "description": "Blender attribute type (e.g., \"FLOAT\", \"INT\")."
+            }
+          ],
+          "returns": "None",
+          "side_effects": [
+            "Ensures attribute exists on obj.data.attributes and sets values"
+          ],
+          "notes": "Sanitized scripts may omit semantic attributes if not required for geometry reproduction.",
+          "implementation": "def write_attribute(obj, fn, name, domain=\"POINT\", data_type=\"FLOAT\"):\n    def geo_attribute(nw: NodeWrangler):\n        geometry = nw.new_node(\n            Nodes.GroupInput, expose_input=[(\"NodeSocketGeometry\", \"Geometry\", None)]\n        )\n        attr = surface.eval_argument(nw, fn, position=nw.new_node(Nodes.InputPosition))\n        geometry = nw.new_node(\n            Nodes.StoreNamedAttribute,\n            input_kwargs={\"Geometry\": geometry, \"Name\": name, \"Value\": attr},\n            attrs={\"domain\": domain, \"data_type\": data_type},\n        )\n        nw.new_node(Nodes.GroupOutput, input_kwargs={\"Geometry\": geometry})\n\n    surface.add_geomod(obj, geo_attribute, apply=True)"
+        },
+        {
+          "name": "write_co",
+          "signature": "write_co(obj: bpy.types.Object, arr: np.ndarray)",
+          "purpose": "Overwrite vertex coordinates with the provided array.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object."
+            },
+            {
+              "name": "arr",
+              "type": "numpy array",
+              "description": "Array of shape (V, 3) where V must exactly match the current vertex count of obj (len(obj.data.vertices)). A mismatch causes RuntimeError."
+            }
+          ],
+          "returns": "obj",
+          "side_effects": [
+            "Modifies mesh vertex positions in-place"
+          ],
+          "notes": "IMPORTANT: arr.shape[0] must exactly equal len(obj.data.vertices). Raises RuntimeError on mismatch. Operations that change vertex count (join_objects, modifiers like SUBSURF/BEVEL/SOLIDIFY, bridge_edge_loops, fill_grid) invalidate any previously captured coordinate array. Always call write_co immediately after the object reaches its target vertex topology, before applying any vertex-count-changing modifiers.",
+          "implementation": "def write_co(obj, arr):\n    try:\n        obj.data.vertices.foreach_set(\"co\", arr.reshape(-1))\n    except RuntimeError as e:\n        raise RuntimeError(\n            f\"Failed to set vertices.co on {obj.name=}. Object has {len(obj.data.vertices)} verts, \"\n            f\"{arr.shape=}\"\n        ) from e"
+        },
+        {
+          "name": "read_co",
+          "signature": "read_co(obj: bpy.types.Object) -> np.ndarray",
+          "purpose": "Read all vertex positions of a mesh into a (V, 3) numpy array. Used to query live geometry before computing predicate-based selections, anchor lookups, or in-place coordinate edits.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object whose vertex coordinates will be read."
+            }
+          ],
+          "returns": "np.ndarray of shape (V, 3) with float vertex coordinates in object space, where V == len(obj.data.vertices).",
+          "side_effects": [
+            "None (read-only)"
+          ],
+          "notes": "Pairs naturally with write_co for read-modify-write patterns: arr = read_co(obj); arr[...] = ...; write_co(obj, arr). Also commonly indexed via numpy ops like np.argmin(np.abs(arr[:, -1] - z)) to find a specific anchor vertex by coordinate. The returned array is a fresh copy, not a view; subsequent topology-changing operations (modifiers, joins, fill_grid, bridge_edge_loops) invalidate any assumption that the indices still correspond to the same vertices.",
+          "implementation": "def read_co(obj):\n    arr = np.zeros(len(obj.data.vertices) * 3)\n    obj.data.vertices.foreach_get(\"co\", arr)\n    return arr.reshape(-1, 3)"
+        },
+        {
+          "name": "read_edge_center",
+          "signature": "read_edge_center(obj: bpy.types.Object) -> np.ndarray",
+          "purpose": "Compute the midpoint of every edge in a mesh as a (E, 3) numpy array. Used to build per-edge boolean predicates (e.g., select edges whose center z lies within a band) without enumerating indices.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object whose edge centers will be computed."
+            }
+          ],
+          "returns": "np.ndarray of shape (E, 3) where E == len(obj.data.edges); each row is (v0 + v1) / 2 for that edge.",
+          "side_effects": [
+            "None (read-only)"
+          ],
+          "notes": "Typical pattern: c = read_edge_center(obj); select_edges(obj, (zmin <= c[:, -1]) & (c[:, -1] <= zmax)). The returned array reflects the current topology at call time; if a subsequent op (e.g., bridge_edge_loops) changes the edge set, you must re-read before issuing more predicate-based selections.",
+          "implementation": "def read_edge_center(obj):\n    return read_co(obj)[read_edges(obj).reshape(-1)].reshape(-1, 2, 3).mean(1)"
+        },
+        {
+          "name": "read_edge_direction",
+          "signature": "read_edge_direction(obj: bpy.types.Object) -> np.ndarray",
+          "purpose": "Compute a unit-length direction vector for every edge in a mesh as a (E, 3) numpy array. Used to build orientation-based predicates (e.g., remove edges that are not vertical).",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object whose per-edge directions will be computed."
+            }
+          ],
+          "returns": "np.ndarray of shape (E, 3); each row is the unit vector (v1 - v0) / ||v1 - v0|| for that edge.",
+          "side_effects": [
+            "None (read-only)"
+          ],
+          "notes": "Direction sign depends on the stored vertex order of each edge; predicates should typically use np.abs on a chosen component to be sign-agnostic, e.g., remove_edges(obj, np.abs(read_edge_direction(obj)[:, -1]) < 0.5).",
+          "implementation": "def read_edge_direction(obj):\n    cos = read_co(obj)[read_edges(obj).reshape(-1)].reshape(-1, 2, 3)\n    return normalize(cos[:, 1] - cos[:, 0])"
+        },
+        {
+          "name": "remove_edges",
+          "signature": "remove_edges(obj: bpy.types.Object, idxs: Iterable[int] | np.ndarray | Callable)",
+          "purpose": "Remove edges identified by indices, a boolean mask over edges, or a position-based predicate callable.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object."
+            },
+            {
+              "name": "idxs",
+              "type": "iterable of edge indices, boolean ndarray of length E, or callable",
+              "description": "If iterable/ndarray: passed to np.nonzero (so a boolean mask of length E selects all True entries; an int iterable selects those edges directly). If callable: invoked as fn(x, y, z) where x, y, z are the per-edge centers from read_edge_center(obj), and must return a boolean mask."
+            }
+          ],
+          "returns": "obj",
+          "side_effects": [
+            "Deletes edges from mesh",
+            "May remove faces as a consequence"
+          ],
+          "notes": "v2 sanitized scripts pass a boolean ndarray built from read_edge_direction(obj) or read_edge_center(obj), e.g., remove_edges(obj, np.abs(read_edge_direction(obj)[:, -1]) < 0.5).",
+          "implementation": "def remove_edges(obj, to_delete):\n    if not isinstance(to_delete, Iterable):\n        x, y, z = read_edge_center(obj).T\n        to_delete = to_delete(x, y, z)\n    to_delete = np.nonzero(to_delete)[0]\n    with butil.ViewportMode(obj, \"EDIT\"):\n        bm = bmesh.from_edit_mesh(obj.data)\n        bm.edges.ensure_lookup_table()\n        geom = [bm.edges[_] for _ in to_delete]\n        bmesh.ops.delete(bm, geom=geom, context=\"EDGES_FACES\")\n        bmesh.update_edit_mesh(obj.data)\n    return obj"
+        },
+        {
+          "name": "remove_vertices",
+          "signature": "remove_vertices(obj: bpy.types.Object, idxs: Iterable[int] | np.ndarray | Callable)",
+          "purpose": "Remove vertices (and associated elements) identified by indices, a boolean mask over vertices, or a position-based predicate callable.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object."
+            },
+            {
+              "name": "idxs",
+              "type": "iterable of vertex indices, boolean ndarray of length V, or callable",
+              "description": "If iterable/ndarray: passed to np.nonzero (so a boolean mask of length V selects all True entries; an int iterable selects those vertices directly). If callable: invoked as fn(x, y, z) where x, y, z are per-vertex coordinates from read_co(obj), and must return a boolean mask."
+            }
+          ],
+          "returns": "obj",
+          "side_effects": [
+            "Topology changes",
+            "Indices will be re-numbered"
+          ],
+          "notes": "v2 sanitized scripts may pass either a callable lambda (e.g., lambda x, y, z: z < -thickness/2) or a precomputed boolean mask derived from read_co(obj).",
+          "implementation": "def remove_vertices(obj, to_delete):\n    if not isinstance(to_delete, Iterable):\n        x, y, z = read_co(obj).T\n        to_delete = to_delete(x, y, z)\n    to_delete = np.nonzero(to_delete)[0]\n    with butil.ViewportMode(obj, \"EDIT\"):\n        bm = bmesh.from_edit_mesh(obj.data)\n        bm.verts.ensure_lookup_table()\n        geom = [bm.verts[_] for _ in to_delete]\n        bmesh.ops.delete(bm, geom=geom)\n        bmesh.update_edit_mesh(obj.data)\n    return obj"
+        },
+        {
+          "name": "select_edges",
+          "signature": "select_edges(obj: bpy.types.Object, idxs: Iterable[int] | np.ndarray | Callable)",
+          "purpose": "Select edges in EDIT mode by indices, a boolean mask over edges, or a position-based predicate callable.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object."
+            },
+            {
+              "name": "idxs",
+              "type": "iterable of edge indices, boolean ndarray of length E, or callable",
+              "description": "If iterable/ndarray: passed to np.nonzero (so a boolean mask of length E selects all True entries; an int iterable selects those edges directly). If callable: invoked as fn(x, y, z) where x, y, z are per-edge centers from read_edge_center(obj), and must return a boolean mask."
+            }
+          ],
+          "returns": "obj",
+          "side_effects": [
+            "Switches obj into EDIT mode for the duration of the call (and back to OBJECT)",
+            "Replaces the current edge selection (deselects all first)"
+          ],
+          "notes": "v2 sanitized scripts cache c = read_edge_center(obj) once and then issue per-band predicates such as select_edges(obj, (zmin <= c[:, -1]) & (c[:, -1] <= zmax)). Each call deselects everything before reselecting, so a follow-up bridge_edge_loops/extrude only acts on the freshly selected band. Re-read read_edge_center after any topology-changing op (e.g., bridge_edge_loops) before issuing more predicate selections.",
+          "implementation": "def select_edges(obj, to_select):\n    if not isinstance(to_select, Iterable):\n        x, y, z = read_edge_center(obj).T\n        to_select = to_select(x, y, z)\n    to_select = np.nonzero(to_select)[0]\n    with butil.ViewportMode(obj, \"EDIT\"):\n        bpy.ops.mesh.select_mode(type=\"EDGE\")\n        bpy.ops.mesh.select_all(action=\"DESELECT\")\n        bm = bmesh.from_edit_mesh(obj.data)\n        bm.edges.ensure_lookup_table()\n        for i in to_select:\n            bm.edges[i].select_set(True)\n        bm.select_flush(False)\n        bmesh.update_edit_mesh(obj.data)\n    return obj"
+        },
+        {
+          "name": "subsurf",
+          "signature": "subsurf(obj: bpy.types.Object, levels: int, simple: bool = False)",
+          "purpose": "Add/adjust a Subdivision Surface modifier.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object."
+            },
+            {
+              "name": "levels",
+              "type": "int",
+              "description": "Subdivision levels."
+            },
+            {
+              "name": "simple",
+              "type": "bool",
+              "default": "False",
+              "description": "Use Simple subdivision instead of Catmull-Clark."
+            }
+          ],
+          "returns": "obj",
+          "side_effects": [
+            "Adds/updates a SUBSURF modifier",
+            "May or may not apply immediately"
+          ],
+          "notes": "Only adds modifier if levels > 0.",
+          "implementation": "def subsurf(obj, levels, simple=False):\n    if levels > 0:\n        butil.modify_mesh(\n            obj,\n            \"SUBSURF\",\n            levels=levels,\n            render_levels=levels,\n            subdivision_type=\"SIMPLE\" if simple else \"CATMULL_CLARK\",\n        )"
+        },
+        {
+          "name": "solidify",
+          "signature": "solidify(obj: bpy.types.Object, axis: int, thickness: float)",
+          "purpose": "Give thickness or radius to limbs/panels.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object."
+            },
+            {
+              "name": "axis",
+              "type": "int or semantic",
+              "description": "Axis along which to extrude (0, 1, or 2)."
+            },
+            {
+              "name": "thickness",
+              "type": "float",
+              "description": "Thickness value."
+            }
+          ],
+          "returns": "obj",
+          "side_effects": [
+            "Depending on limb style, either uses a custom nodegroup (radius) or adds SOLIDIFY and BEVEL",
+            "Modifies object location and applies transform"
+          ],
+          "notes": "Extrudes along two perpendicular axes to create thickness.",
+          "implementation": "def solidify(obj, axis, thickness):\n    axes = [0, 1, 2]\n    axes.remove(axis)\n    u = np.zeros(3)\n    u[axes[0]] = thickness\n    v = np.zeros(3)\n    v[axes[1]] = thickness\n    butil.select_none()\n    with butil.ViewportMode(obj, \"EDIT\"):\n        bpy.ops.mesh.select_all(action=\"SELECT\")\n        bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={\"value\": u})\n        bpy.ops.mesh.select_all(action=\"SELECT\")\n        bpy.ops.mesh.extrude_region_move(TRANSFORM_OT_translate={\"value\": v})\n    obj.location = -(u + v) / 2\n    butil.apply_transform(obj, True)\n    return obj"
+        }
+      ]
+    },
+    "infinigen.assets.utils.object": {
+      "functions": [
+        {
+          "name": "join_objects",
+          "signature": "join_objects(objs: bpy.types.Object | Sequence[bpy.types.Object])",
+          "purpose": "Join multiple mesh objects into the first active object.",
+          "inputs": [
+            {
+              "name": "objs",
+              "type": "list of bpy.types.Object (MESH) or single object",
+              "description": "Objects to join. Can be a list or single object."
+            }
+          ],
+          "returns": "The active/merged object (MESH).",
+          "side_effects": [
+            "Selection/active state",
+            "Removes other objects by merging data",
+            "Resets location, rotation, and scale of merged object"
+          ],
+          "notes": "Sanitized scripts generally avoid global final join; may join specific temporary parts during back decor creation.",
+          "implementation": "def join_objects(obj):\n    butil.select_none()\n    if not isinstance(obj, list):\n        obj = [obj]\n    if len(obj) == 1:\n        return obj[0]\n    bpy.context.view_layer.objects.active = obj[0]\n    butil.select_none()\n    butil.select(obj)\n    bpy.ops.object.join()\n    obj = bpy.context.active_object\n    obj.location = 0, 0, 0\n    obj.rotation_euler = 0, 0, 0\n    obj.scale = 1, 1, 1\n    butil.select_none()\n    return obj"
+        },
+        {
+          "name": "new_bbox",
+          "signature": "new_bbox(xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float)",
+          "purpose": "Create a bounding-box mesh primitive.",
+          "inputs": [
+            {
+              "name": "xmin, xmax",
+              "type": "float",
+              "description": "X-axis extents."
+            },
+            {
+              "name": "ymin, ymax",
+              "type": "float",
+              "description": "Y-axis extents."
+            },
+            {
+              "name": "zmin, zmax",
+              "type": "float",
+              "description": "Z-axis extents."
+            }
+          ],
+          "returns": "bpy.types.Object (MESH) for the box, linked to the scene.",
+          "side_effects": [
+            "Creates and links new object to scene",
+            "Applies transform to bake geometry"
+          ],
+          "notes": "Creates a cube and scales/positions it to match the bounding box extents.",
+          "implementation": "def new_bbox(x, x_, y, y_, z, z_):\n    obj = new_cube()\n    obj.location = (x + x_) / 2, (y + y_) / 2, (z + z_) / 2\n    obj.scale = (x_ - x) / 2, (y_ - y) / 2, (z_ - z) / 2\n    butil.apply_transform(obj, True)\n    return obj"
+        }
+      ]
+    },
+    "infinigen.assets.utils.nodegroup": {
+      "functions": [
+        {
+          "name": "geo_radius",
+          "signature": "geo_radius(nw: NodeWrangler, radius: float | Callable, resolution: int = 6, merge_distance: float = 0.004, rotation: float = 0, to_align_tilt: bool = True, align_tilt_axis: tuple[float, float, float] = (0, 0, 1))",
+          "purpose": "Nodegroup function/reference used to add a thickness/radius via Geometry Nodes.",
+          "inputs": [
+            {
+              "name": "nw",
+              "type": "NodeWrangler",
+              "description": "NodeWrangler instance for building geometry nodes."
+            },
+            {
+              "name": "radius",
+              "type": "float or callable",
+              "description": "Radius value or function to evaluate."
+            },
+            {
+              "name": "resolution",
+              "type": "int",
+              "default": "6",
+              "description": "Resolution of the curve circle."
+            },
+            {
+              "name": "merge_distance",
+              "type": "float",
+              "default": "0.004",
+              "description": "Distance threshold for merging vertices."
+            },
+            {
+              "name": "rotation",
+              "type": "float",
+              "default": "0",
+              "description": "Rotation angle for the profile circle."
+            },
+            {
+              "name": "to_align_tilt",
+              "type": "bool",
+              "default": "True",
+              "description": "Whether to align curve tilt."
+            },
+            {
+              "name": "align_tilt_axis",
+              "type": "tuple",
+              "default": "(0, 0, 1)",
+              "description": "Axis for tilt alignment."
+            }
+          ],
+          "returns": "None (nodegroup function, used with surface.add_geomod)",
+          "side_effects": [
+            "Creates geometry nodes modifier when used with surface.add_geomod"
+          ],
+          "notes": "In primitive scripts, only geo_radius is referenced (other closures are not serializable and are skipped). Usage: Passed to surface.add_geomod(obj, geo_radius, ...).",
+          "implementation": "def geo_radius(\n    nw: NodeWrangler,\n    radius,\n    resolution=6,\n    merge_distance=0.004,\n    rotation=0,\n    to_align_tilt=True,\n    align_tilt_axis=(0, 0, 1),\n):\n    skeleton = nw.new_node(\n        Nodes.GroupInput, expose_input=[(\"NodeSocketGeometry\", \"Geometry\", None)]\n    )\n    radius = surface.eval_argument(nw, radius)\n    curve = nw.new_node(Nodes.MeshToCurve, [skeleton])\n    if to_align_tilt:\n        curve = align_tilt(nw, curve, align_tilt_axis)\n    skeleton = nw.new_node(\n        Nodes.SetCurveRadius, input_kwargs={\"Curve\": curve, \"Radius\": radius}\n    )\n    geometry = nw.curve2mesh(\n        skeleton,\n        nw.new_node(\n            Nodes.Transform,\n            [nw.new_node(Nodes.CurveCircle, input_kwargs={\"Resolution\": resolution})],\n            input_kwargs={\"Rotation\": [0, 0, rotation]},\n        ),\n    )\n    if merge_distance > 0:\n        geometry = nw.new_node(Nodes.MergeByDistance, [geometry, None, merge_distance])\n    nw.new_node(Nodes.GroupOutput, input_kwargs={\"Geometry\": geometry})"
+        }
+      ]
+    },
+    "infinigen.core.util.blender": {
+      "alias": "butil",
+      "functions": [
+        {
+          "name": "modify_mesh",
+          "signature": "butil.modify_mesh(obj: bpy.types.Object, type: str, apply: bool = True, name: str | None = None, return_mod: bool = False, ng_inputs: dict | None = None, show_viewport: bool | None = None, **kwargs)",
+          "purpose": "Create/configure/apply a standard Blender modifier on an object (e.g., WELD, MIRROR, SOLIDIFY, SUBSURF, BEVEL).",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object."
+            },
+            {
+              "name": "type",
+              "type": "string",
+              "description": "Modifier type (e.g., 'WELD', 'MIRROR', 'SOLIDIFY', 'BEVEL', 'SUBSURF')."
+            },
+            {
+              "name": "apply",
+              "type": "bool",
+              "default": "True",
+              "description": "Whether to apply the modifier immediately."
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "default": "None",
+              "description": "Modifier name."
+            },
+            {
+              "name": "return_mod",
+              "type": "bool",
+              "default": "False",
+              "description": "Whether to return the modifier object."
+            },
+            {
+              "name": "ng_inputs",
+              "type": "dict",
+              "default": "None",
+              "description": "Geometry nodes inputs (if applicable)."
+            },
+            {
+              "name": "show_viewport",
+              "type": "bool",
+              "default": "None",
+              "description": "Whether to show modifier in viewport."
+            },
+            {
+              "name": "**kwargs",
+              "type": "dict",
+              "description": "Modifier properties (e.g., merge_threshold, levels, width, segments, offset)."
+            }
+          ],
+          "returns": "obj (or obj, mod if return_mod=True and not applied).",
+          "side_effects": [
+            "Creates and optionally applies a Blender modifier in correct order"
+          ],
+          "notes": "Standard way to add modifiers in primitive scripts."
+        },
+        {
+          "name": "apply_transform",
+          "signature": "butil.apply_transform(obj: bpy.types.Object, loc: bool = False, rot: bool = True, scale: bool = True)",
+          "purpose": "Apply object transforms (location, rotation, scale) to bake geometry.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object",
+              "description": "Object to transform."
+            },
+            {
+              "name": "loc",
+              "type": "bool",
+              "default": "False",
+              "description": "Whether to apply location transform."
+            },
+            {
+              "name": "rot",
+              "type": "bool",
+              "default": "True",
+              "description": "Whether to apply rotation transform."
+            },
+            {
+              "name": "scale",
+              "type": "bool",
+              "default": "True",
+              "description": "Whether to apply scale transform."
+            }
+          ],
+          "returns": "None",
+          "side_effects": [
+            "Bakes transforms into mesh data"
+          ],
+          "notes": "Sanitized usage: Typically rot=True, scale=True (and sometimes loc=True), emitted explicitly."
+        },
+        {
+          "name": "apply_modifiers",
+          "signature": "butil.apply_modifiers(obj: bpy.types.Object, mod: str | object | list | None = None, quiet: bool = True)",
+          "purpose": "Apply one or multiple modifiers.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object (MESH)",
+              "description": "MESH object."
+            },
+            {
+              "name": "mod",
+              "type": "name/obj/list or None",
+              "default": "None",
+              "description": "Specific modifier(s) to apply, or None for all."
+            },
+            {
+              "name": "quiet",
+              "type": "bool",
+              "default": "True",
+              "description": "Whether to suppress errors."
+            }
+          ],
+          "returns": "None (or object depending on mode).",
+          "side_effects": [
+            "Applies modifiers in order",
+            "May remove attributes/material slots"
+          ],
+          "notes": "Used to bake modifier effects into geometry."
+        },
+        {
+          "name": "deep_clone_obj",
+          "signature": "deep_clone_obj(obj: bpy.types.Object, keep_modifiers: bool = False, keep_materials: bool = False)",
+          "purpose": "Duplicate object and its mesh data, linking clone to scene.",
+          "inputs": [
+            {
+              "name": "obj",
+              "type": "bpy.types.Object",
+              "description": "Object to clone."
+            },
+            {
+              "name": "keep_modifiers",
+              "type": "bool",
+              "default": "False",
+              "description": "Whether to keep modifiers on clone."
+            },
+            {
+              "name": "keep_materials",
+              "type": "bool",
+              "default": "False",
+              "description": "Whether to keep materials on clone."
+            }
+          ],
+          "returns": "cloned bpy.types.Object",
+          "side_effects": [
+            "New object/memory allocation",
+            "Links clone to scene"
+          ],
+          "notes": "Creates independent copy of object and mesh data.",
+          "implementation": "def deep_clone_obj(obj, keep_modifiers=False, keep_materials=False):\n    new_obj = obj.copy()\n    new_obj.data = obj.data.copy()\n    if not keep_modifiers:\n        for mod in new_obj.modifiers:\n            new_obj.modifiers.remove(mod)\n    if not keep_materials:\n        while len(new_obj.data.materials) > 0:\n            new_obj.data.materials.pop()\n    bpy.context.collection.objects.link(new_obj)\n    return new_obj"
+        }
+      ]
+    },
+    "infinigen.core.surface": {
+      "alias": "surface",
+      "functions": [
+        {
+          "name": "add_geomod",
+          "signature": "surface.add_geomod(objs: bpy.types.Object | Sequence[bpy.types.Object], geo_func: Callable, name: str | None = None, apply: bool = False, reuse: bool = False, input_args: list | None = None, input_kwargs: dict | None = None, attributes: list | None = None, show_viewport: bool = True, selection: np.ndarray | None = None, domains: list | None = None, input_attributes: list | None = None)",
+          "purpose": "Add a Geometry Nodes modifier based on a nodegroup (e.g., geo_radius) and optionally apply.",
+          "inputs": [
+            {
+              "name": "objs",
+              "type": "bpy.types.Object (MESH) or list",
+              "description": "Object(s) to add modifier to."
+            },
+            {
+              "name": "geo_func",
+              "type": "callable/ref",
+              "description": "Nodegroup function (e.g., geo_radius)."
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "default": "None",
+              "description": "Modifier name (defaults to geo_func.__name__)."
+            },
+            {
+              "name": "apply",
+              "type": "bool",
+              "default": "False",
+              "description": "Whether to apply the modifier immediately."
+            },
+            {
+              "name": "reuse",
+              "type": "bool",
+              "default": "False",
+              "description": "Whether to reuse existing node group."
+            },
+            {
+              "name": "input_args",
+              "type": "list",
+              "default": "None",
+              "description": "Positional arguments for geo_func."
+            },
+            {
+              "name": "input_kwargs",
+              "type": "dict",
+              "default": "None",
+              "description": "Keyword arguments for geo_func."
+            },
+            {
+              "name": "attributes",
+              "type": "list",
+              "default": "None",
+              "description": "Attribute names to output."
+            },
+            {
+              "name": "show_viewport",
+              "type": "bool",
+              "default": "True",
+              "description": "Whether to show modifier in viewport."
+            },
+            {
+              "name": "selection",
+              "type": "array",
+              "default": "None",
+              "description": "Selection mask for modifier."
+            },
+            {
+              "name": "domains",
+              "type": "list",
+              "default": "None",
+              "description": "Attribute domains (defaults to [\"POINT\"] * len(attributes))."
+            },
+            {
+              "name": "input_attributes",
+              "type": "list",
+              "default": "None",
+              "description": "Input attribute names (128 max)."
+            }
+          ],
+          "returns": "obj (or modifier depending on usage).",
+          "side_effects": [
+            "Adds nodes modifier",
+            "May be applied (baked) to geometry"
+          ],
+          "notes": "Sanitized scripts only use resolvable nodegroups like geo_radius.",
+          "implementation": "def add_geomod(\n    objs,\n    geo_func,\n    name=None,\n    apply=False,\n    reuse=False,\n    input_args=None,\n    input_kwargs=None,\n    attributes=None,\n    show_viewport=True,\n    selection=None,\n    domains=None,\n    input_attributes=None,\n):\n    if input_args is None:\n        input_args = []\n    if input_kwargs is None:\n        input_kwargs = {}\n    if attributes is None:\n        attributes = []\n    if domains is None:\n        domains = [\"POINT\"] * len(attributes)\n    if input_attributes is None:\n        input_attributes = [None] * 128\n\n    if name is None:\n        name = geo_func.__name__\n    if not isinstance(objs, list):\n        objs = [objs]\n    elif len(objs) == 0:\n        return None\n\n    if selection is not None:\n        input_kwargs[\"selection\"] = selection\n\n    ng = None\n    for obj in objs:\n        mod = obj.modifiers.new(name=name, type=\"NODES\")\n        mod.show_viewport = False\n\n        if mod is None:\n            raise ValueError(\n                f\"Attempted to surface.add_geomod({obj=}), yet created modifier was None. \"\n                f\"Check that {obj.type=} supports geo modifiers\"\n            )\n\n        mod.show_viewport = show_viewport\n        if ng is None:  # Create a unique node_group for the first one only\n            if reuse and name in bpy.data.node_groups:\n                mod.node_group = bpy.data.node_groups[name]\n            else:\n                # print(\"input_kwargs\", input_kwargs, geo_func.__name__)\n                if mod.node_group is None:\n                    group = geometry_node_group_empty_new()\n                    mod.node_group = group\n                nw = NodeWrangler(mod)\n                geo_func(nw, *input_args, **input_kwargs)\n            ng = mod.node_group\n            ng.name = name\n        else:\n            mod.node_group = ng\n\n        non_geometries = [\n            o\n            for o in ng_outputs(mod.node_group).values()\n            if o.socket_type != \"NodeSocketGeometry\"\n        ]\n        if len(non_geometries) != len(attributes):\n            raise Exception(\n                f\"has {len(non_geometries)} identifiers, but {len(attributes)} attributes. Specifically, \"\n                f\"{non_geometries=} and {attributes=}\"\n            )\n        for o, att_name in zip(non_geometries, attributes):\n            # attributes are a 1-indexed list, and Geometry is the first element, so we start from 2\n            # while f'Output_{i}_attribute_name' not in\n            mod[o.identifier + \"_attribute_name\"] = att_name\n        for o, domain in zip(non_geometries, domains):\n            o.attribute_domain = domain\n\n        inputs = ng_inputs(mod.node_group)\n        if not any(att_name is None for att_name in input_attributes):\n            raise Exception(\"None should be provided for Geometry inputs.\")\n        for i, att_name in zip(inputs.values(), input_attributes):\n            o = i.identifier\n            if att_name is not None:\n                mod[f\"{o}_use_attribute\"] = True\n                mod[f\"{o}_attribute_name\"] = att_name\n\n    if apply:\n        for obj in objs:\n            butil.apply_modifiers(obj, name)\n        return None\n\n    return mod"
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "description": "Create a seat surface from anchors and fill",
+      "code": "obj = bezier_curve((np.array([...]), np.array([...]), np.array([...])), vector_locations=[4], resolution=12)\nbutil.modify_mesh(obj, 'WELD', merge_threshold=0.001)\nwith butil.ViewportMode(obj, 'EDIT'):\n    bpy.ops.mesh.select_all(action='SELECT')\n    bpy.ops.mesh.fill_grid(use_interp_simple=True)"
+    },
+    {
+      "description": "Round a limb with geometry nodes",
+      "code": "surface.add_geomod(obj, geo_radius, apply=True, input_args=[0.02, 32], input_kwargs={})"
+    },
+    {
+      "description": "Apply transforms",
+      "code": "obj.rotation_euler.z += 1.5707963267948966\nbutil.apply_transform(obj)"
+    }
+  ]
+}
+

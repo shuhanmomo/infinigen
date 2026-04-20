@@ -19,6 +19,9 @@ from infinigen.assets.building_facade_decor_logic_logged import (
 )
 from infinigen.assets.building_facade_mat_logged import BuildingFacadeMatFactoryLogged
 from infinigen.assets.objects.seating.chairs.chair_logged import ChairFactoryLogged
+from infinigen.assets.objects.seating.chairs.chair_logged_v2 import (
+    ChairFactoryLogged as ChairFactoryLoggedV2,
+)
 
 
 def make_args():
@@ -29,6 +32,7 @@ def make_args():
         default="chair",
         choices=[
             "chair",
+            "chair_v2",
             "building_facade",
             "building_facade_decor",
             "building_facade_mat",
@@ -63,6 +67,8 @@ def make_args():
 def _factory_spec(factory_name: str):
     if factory_name == "chair":
         return ChairFactoryLogged, "chair_sanitized.py", True
+    if factory_name == "chair_v2":
+        return ChairFactoryLoggedV2, "chair_sanitized.py", False
     if factory_name == "building_facade":
         return BuildingFacadeFactoryLogged, "building_facade_sanitized.py", False
     if factory_name == "building_facade_decor":
@@ -371,6 +377,7 @@ def main(args):
     if args.output_root is None:
         defaults = {
             "chair": "outputs/chairs",
+            "chair_v2": "outputs/chairs_v2",
             "building_facade": "outputs/building_facade_logged",
             "building_facade_decor": "outputs/building_facade_decor_logged",
             "building_facade_mat": "outputs/building_facade_mat_logged",
