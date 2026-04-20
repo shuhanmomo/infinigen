@@ -21,6 +21,9 @@ from infinigen.assets.building_facade_logged import BuildingFacadeFactoryLogged
 from infinigen.assets.building_facade_decor_logic_logged import (
     BuildingFacadeDecorFactoryLogged,
 )
+from infinigen.assets.building_facade_decor_logic_v2_logged import (
+    BuildingFacadeDecorV2FactoryLogged,
+)
 from infinigen.assets.building_facade_mat_logged import BuildingFacadeMatFactoryLogged
 from infinigen.assets.objects.seating.chairs.chair_logged import ChairFactoryLogged
 from infinigen.assets.objects.seating.chairs.chair_logged_v2 import (
@@ -39,6 +42,7 @@ def make_args():
             "chair_v2",
             "building_facade",
             "building_facade_decor",
+            "building_facade_decor_v2",
             "building_facade_mat",
         ],
         help="Which logged factory to run",
@@ -92,6 +96,13 @@ def _factory_spec(factory_name: str):
             "building_facade_decor_sanitized.py",
             False,
             None,
+        )
+    if factory_name == "building_facade_decor_v2":
+        return (
+            BuildingFacadeDecorV2FactoryLogged,
+            "building_facade_decor_v2_sanitized.py",
+            True,
+            "BuildingFacadeDecorV2_infinigen",
         )
     if factory_name == "building_facade_mat":
         return (
@@ -210,6 +221,16 @@ _CODEBANK_SOURCES: dict = {
     "building_facade_decor": (
         "infinigen.assets.building_facade_decor_logic",
         "BuildingFacadeDecorFactory",
+        {
+            "__init__",
+            "create_asset", "create_placeholder",
+            "spawn_asset", "spawn_placeholder",
+            "finalize_assets", "write_obj_to_label",
+        },
+    ),
+    "building_facade_decor_v2": (
+        "infinigen.assets.building_facade_decor_logic_v2",
+        "BuildingFacadeDecorV2Factory",
         {
             "__init__",
             "create_asset", "create_placeholder",
@@ -523,6 +544,7 @@ def main(args):
             "chair_v2": "outputs/chairs_v2",
             "building_facade": "outputs/building_facade_logged",
             "building_facade_decor": "outputs/building_facade_decor_logged",
+            "building_facade_decor_v2": "outputs/building_facade_decor_v2_logged",
             "building_facade_mat": "outputs/building_facade_mat_logged",
         }
         args.output_root = Path(defaults.get(args.factory, "outputs/assets"))
