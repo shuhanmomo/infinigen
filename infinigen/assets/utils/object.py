@@ -96,6 +96,179 @@ def new_bbox(x, x_, y, y_, z, z_):
     return obj
 
 
+# --------------------------------------------------------------------------- #
+# Axis-aligned non-cuboid primitives (sit alongside ``new_bbox`` in the DSL)
+# --------------------------------------------------------------------------- #
+
+def _resolve_prism_axes(
+    x0, y0, z0, x1, y1, z1, rise_x, rise_y, rise_z, fn_name,
+):
+    """Resolve (base_axis, rise_axis, thick_axis, base_sign, rise_sign) from
+    the flat-arg form used by ``new_tri_prism`` / ``new_half_cylinder``.
+
+    The base segment must be axis-aligned (exactly one of dx/dy/dz nonzero).
+    The rise direction must also be axis-aligned (exactly one of rise_x/y/z
+    nonzero) and perpendicular to the base axis. The remaining axis is the
+    thickness axis, automatically derived.
+    """
+    base_delta = (x1 - x0, y1 - y0, z1 - z0)
+    base_axes = [i for i, d in enumerate(base_delta) if abs(d) > 1e-9]
+    if len(base_axes) != 1:
+        raise ValueError(
+            f"{fn_name}: base segment must be axis-aligned (exactly one of "
+            f"dx/dy/dz nonzero); got delta={base_delta}"
+        )
+    base_axis = base_axes[0]
+    base_sign = 1.0 if base_delta[base_axis] > 0 else -1.0
+
+    rise = (rise_x, rise_y, rise_z)
+    rise_axes = [i for i, d in enumerate(rise) if abs(d) > 1e-9]
+    if len(rise_axes) != 1:
+        raise ValueError(
+            f"{fn_name}: rise direction must be axis-aligned with exactly one "
+            f"nonzero component; got (rise_x={rise_x}, rise_y={rise_y}, "
+            f"rise_z={rise_z})"
+        )
+    rise_axis = rise_axes[0]
+    if rise_axis == base_axis:
+        raise ValueError(
+            f"{fn_name}: rise direction must be perpendicular to the base "
+            f"axis (base axis is {'xyz'[base_axis]})"
+        )
+    rise_sign = 1.0 if rise[rise_axis] > 0 else -1.0
+
+    thick_axis = ({0, 1, 2} - {base_axis, rise_axis}).pop()
+    return base_axis, rise_axis, thick_axis, base_sign, rise_sign
+
+
+def new_tri_prism(
+    x0, y0, z0, x1, y1, z1,
+    height, thickness,
+    rise_x=0, rise_y=0, rise_z=1,
+):
+    """Create an isoceles triangular prism (gable / pediment / awning).
+
+    The triangle's base segment is the axis-aligned line from ``(x0,y0,z0)``
+    to ``(x1,y1,z1)``. The apex sits at the base midpoint offset by
+    ``height`` along the ``(rise_x, rise_y, rise_z)`` direction (must be a
+    single axis-aligned ±1 vector, perpendicular to the base axis). The 2D
+    triangle is then extruded by ``thickness`` along the remaining (third)
+    axis; sign of ``thickness`` picks the extrusion direction.
+
+    Defaults (``rise_x=0, rise_y=0, rise_z=1``) place the apex straight up
+    along +Z and extrude through the remaining axis (Y if base is along X).
+
+    Returns the new mesh object linked to the active collection.
+    """
+    base_axis, rise_axis, thick_axis, _, rise_sign = _resolve_prism_axes(
+        x0, y0, z0, x1, y1, z1, rise_x, rise_y, rise_z, "new_tri_prism",
+    )
+    if height <= 0:
+        raise ValueError("new_tri_prism: height must be positive")
+
+    base_mid = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2]
+    apex = list(base_mid)
+    apex[rise_axis] += rise_sign * height
+
+    front = [[x0, y0, z0], [x1, y1, z1], apex]
+    back = []
+    for v in front:
+        v2 = list(v)
+        v2[thick_axis] += thickness
+        back.append(v2)
+    verts = front + back  # 0..2 = front (b0, b1, apex), 3..5 = back
+
+    faces = [
+        (0, 1, 2),       # front triangle
+        (3, 5, 4),       # back triangle
+        (0, 3, 4, 1),    # base quad
+        (1, 4, 5, 2),    # base_end -> apex slope quad
+        (2, 5, 3, 0),    # apex -> base_start slope quad
+    ]
+    if thickness < 0:
+        faces = [tuple(reversed(f)) for f in faces]
+
+    mesh = data2mesh(verts, faces=faces, name="tri_prism")
+    obj = mesh2obj(mesh)
+    return obj
+
+
+def new_half_cylinder(
+    x0, y0, z0, x1, y1, z1,
+    height, thickness,
+    rise_x=0, rise_y=0, rise_z=1,
+    segments=16,
+):
+    """Create a half-elliptical-cylinder prism (arched window head, half-round
+    dormer, segmental arch, etc.).
+
+    The flat diameter of the half-disk runs from ``(x0,y0,z0)`` to
+    ``(x1,y1,z1)`` along an axis-aligned segment; the arc bulges along
+    ``(rise_x, rise_y, rise_z)`` (single axis-aligned +/-1 vector,
+    perpendicular to the base axis) by ``height``. The arc is parameterized
+    as a half-ellipse with horizontal semi-axis ``base_length / 2`` and
+    vertical semi-axis ``height``:
+
+      - height == base_length / 2 -> true semicircle (perfect half-disk)
+      - height <  base_length / 2 -> squat / segmental arch
+      - height >  base_length / 2 -> tall / stilted ellipse
+
+    The half-disk is then extruded by ``thickness`` along the remaining
+    (third) axis; sign picks the direction.
+
+    ``segments`` controls arc tessellation (number of edges spanning the
+    half-ellipse). Default 16 is smooth at typical facade scale.
+
+    Returns the new mesh object linked to the active collection.
+    """
+    base_axis, rise_axis, thick_axis, base_sign, rise_sign = _resolve_prism_axes(
+        x0, y0, z0, x1, y1, z1, rise_x, rise_y, rise_z, "new_half_cylinder",
+    )
+    if height <= 0:
+        raise ValueError("new_half_cylinder: height must be positive")
+    if segments < 3:
+        raise ValueError("new_half_cylinder: segments must be >= 3")
+    base_length = abs((x1 - x0, y1 - y0, z1 - z0)[base_axis])
+    radius = base_length / 2.0
+
+    base_mid = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2]
+
+    # Front-face arc: theta=0 at base_end, theta=pi at base_start. n verts
+    # (segments + 1) including both diameter endpoints. Half-ellipse with
+    # horizontal semi-axis = radius, vertical semi-axis = height.
+    n = segments + 1
+    front = []
+    for i in range(n):
+        theta = (i / segments) * np.pi
+        v = list(base_mid)
+        v[base_axis] = base_mid[base_axis] + base_sign * radius * np.cos(theta)
+        v[rise_axis] = base_mid[rise_axis] + rise_sign * height * np.sin(theta)
+        front.append(v)
+
+    back = []
+    for v in front:
+        v2 = list(v)
+        v2[thick_axis] += thickness
+        back.append(v2)
+    verts = front + back  # 0..n-1 = front arc, n..2n-1 = back arc
+
+    front_face = tuple(range(n))
+    back_face = tuple(range(2 * n - 1, n - 1, -1))
+    faces = [front_face, back_face]
+    for i in range(n - 1):
+        faces.append((i, i + 1, n + i + 1, n + i))
+    # Bottom diameter face. Winding chosen so the outward normal points
+    # opposite to the rise direction (i.e. away from the dome).
+    faces.append((n - 1, 2 * n - 1, n, 0))
+
+    if thickness < 0:
+        faces = [tuple(reversed(f)) for f in faces]
+
+    mesh = data2mesh(verts, faces=faces, name="half_cylinder")
+    obj = mesh2obj(mesh)
+    return obj
+
+
 def new_bbox_2d(x, x_, y, y_, z=0):
     obj = new_plane()
     obj.location = (x + x_) / 2, (y + y_) / 2, z

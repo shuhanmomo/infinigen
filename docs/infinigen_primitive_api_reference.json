@@ -1,0 +1,185 @@
+{
+  "metadata": {
+    "title": "Infinigen Primitive API Reference",
+    "description": "Facade-focused DSL summary for primitive-driven programs. Keep the prompt surface on axis-aligned primitive composition helpers (cuboids, triangular prisms, half-cylinders) instead of the broader curve/modifier stack.",
+    "version": "1.1"
+  },
+  "general_notes": {
+    "replay_context": [
+      "Facade primitives in this family are bbox-first and assemble geometry by placing axis-aligned primitives.",
+      "Use direct primitive composition helpers (`new_bbox`, `new_tri_prism`, `new_half_cylinder`) before considering broader Infinigen curve or modifier APIs."
+    ],
+    "script_notes": [
+      "Prefer `new_bbox(...)` for walls, windows, lintels, sills, jambs, and other rectangular panel-like elements.",
+      "Use `new_tri_prism(...)` for gables, pediments, awnings, and any isoceles triangular profile that extrudes through a third axis.",
+      "Use `new_half_cylinder(...)` for arched window heads, half-round dormers, barrel-vault details, and any half-disk profile that extrudes through a third axis.",
+      "All three primitive helpers share the same coordinate convention: arguments are flat scalars (no tuples), the base/diameter segment must be axis-aligned, and the extrusion (thickness) axis is auto-derived from the remaining axis.",
+      "Use `join_objects(...)` only when the primitive script needs one merged object after constructing multiple primitive pieces."
+    ],
+    "imports": [
+      "import bpy",
+      "from infinigen.assets.utils.object import join_objects, new_bbox, new_tri_prism, new_half_cylinder"
+    ]
+  },
+  "modules": {
+    "infinigen.assets.utils.object": {
+      "functions": [
+        {
+          "name": "new_bbox",
+          "signature": "new_bbox(xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float)",
+          "purpose": "Create one axis-aligned cuboid from explicit min/max bounds. This is the primary facade-building primitive.",
+          "inputs": [
+            {
+              "name": "xmin, xmax",
+              "type": "float",
+              "description": "X extents for the box."
+            },
+            {
+              "name": "ymin, ymax",
+              "type": "float",
+              "description": "Y extents for the box."
+            },
+            {
+              "name": "zmin, zmax",
+              "type": "float",
+              "description": "Z extents for the box."
+            }
+          ],
+          "returns": "bpy.types.Object (MESH) for the cuboid, linked to the active scene.",
+          "side_effects": [
+            "Creates a new object",
+            "Applies the transform so the mesh matches the requested bbox"
+          ],
+          "notes": "Use this directly for facade panels and openings. Do not replace it with unrelated curve helpers."
+        },
+        {
+          "name": "new_tri_prism",
+          "signature": "new_tri_prism(x0: float, y0: float, z0: float, x1: float, y1: float, z1: float, height: float, thickness: float, rise_x: float = 0, rise_y: float = 0, rise_z: float = 1)",
+          "purpose": "Create one isoceles triangular prism (gable, pediment, awning, etc.) from a flat axis-aligned base segment, an apex offset, and an extrusion thickness.",
+          "inputs": [
+            {
+              "name": "x0, y0, z0",
+              "type": "float",
+              "description": "Start point of the base segment (one corner of the triangle base)."
+            },
+            {
+              "name": "x1, y1, z1",
+              "type": "float",
+              "description": "End point of the base segment (other corner of the triangle base). The base must be axis-aligned: exactly one of (x1-x0, y1-y0, z1-z0) is nonzero."
+            },
+            {
+              "name": "height",
+              "type": "float (positive)",
+              "description": "Distance from the base midpoint to the apex along the rise direction."
+            },
+            {
+              "name": "thickness",
+              "type": "float (signed)",
+              "description": "Extrusion length along the third (auto-derived) axis. Positive extrudes in +axis, negative in -axis."
+            },
+            {
+              "name": "rise_x, rise_y, rise_z",
+              "type": "float",
+              "description": "Apex rise direction. Must be axis-aligned with exactly one nonzero component (sign sets the direction); must be perpendicular to the base axis. Default (0, 0, 1) puts the apex straight up along +Z."
+            }
+          ],
+          "returns": "bpy.types.Object (MESH) for the triangular prism, linked to the active collection.",
+          "side_effects": [
+            "Creates a new mesh object with 6 vertices and 5 faces (2 triangle caps + base quad + 2 slope quads)"
+          ],
+          "notes": "The third axis (thickness extrusion) is auto-derived as the axis that is neither the base axis nor the rise axis, so the user never has to name it. For a vertical front-facing gable on a building, use the default rise (apex up Z) and set the base segment along X; thickness then runs through Y."
+        },
+        {
+          "name": "new_half_cylinder",
+          "signature": "new_half_cylinder(x0: float, y0: float, z0: float, x1: float, y1: float, z1: float, height: float, thickness: float, rise_x: float = 0, rise_y: float = 0, rise_z: float = 1, segments: int = 16)",
+          "purpose": "Create one half-elliptical-cylinder prism (arched window head, half-round dormer, segmental arch, barrel-vault detail) from a flat axis-aligned diameter segment, an arc rise, and an extrusion thickness.",
+          "inputs": [
+            {
+              "name": "x0, y0, z0",
+              "type": "float",
+              "description": "Start point of the flat diameter (one end of the half-disk's straight edge)."
+            },
+            {
+              "name": "x1, y1, z1",
+              "type": "float",
+              "description": "End point of the flat diameter. The diameter must be axis-aligned: exactly one of (x1-x0, y1-y0, z1-z0) is nonzero."
+            },
+            {
+              "name": "height",
+              "type": "float (positive)",
+              "description": "Arc rise above the diameter, along the rise direction. Equals base_length/2 for a true semicircle, smaller for a squat/segmental arch, larger for a tall stilted ellipse."
+            },
+            {
+              "name": "thickness",
+              "type": "float (signed)",
+              "description": "Extrusion length along the third (auto-derived) axis. Positive extrudes in +axis, negative in -axis."
+            },
+            {
+              "name": "rise_x, rise_y, rise_z",
+              "type": "float",
+              "description": "Direction the arc bulges. Must be axis-aligned with exactly one nonzero component (sign sets the direction); must be perpendicular to the base axis. Default (0, 0, 1) makes the arc bulge straight up along +Z."
+            },
+            {
+              "name": "segments",
+              "type": "int (>= 3)",
+              "description": "Number of edges spanning the half-ellipse. Default 16 is smooth at typical facade scale; increase for closeups, decrease for distant LODs."
+            }
+          ],
+          "returns": "bpy.types.Object (MESH) for the half-cylinder prism, linked to the active collection.",
+          "side_effects": [
+            "Creates a new mesh object with 2 * (segments + 1) vertices and (segments + 1 + 2) faces (2 half-disk caps + curved side strip + flat bottom)"
+          ],
+          "notes": "The arc is a half-ellipse: horizontal semi-axis = base_length / 2, vertical semi-axis = height. Pass height = base_length / 2 to recover the perfect semicircle. The third axis (thickness extrusion) is auto-derived as the axis that is neither the base axis nor the rise axis. For an arched window head on a vertical wall, set the base segment along X at the desired window-top Z, leave rise default (+Z), and thickness then runs through Y."
+        },
+        {
+          "name": "join_objects",
+          "signature": "join_objects(objs: bpy.types.Object | Sequence[bpy.types.Object])",
+          "purpose": "Merge several primitive-built pieces into one object when the primitive script needs a combined facade element.",
+          "inputs": [
+            {
+              "name": "objs",
+              "type": "object or sequence of objects",
+              "description": "Objects to merge into the active object."
+            }
+          ],
+          "returns": "The merged bpy.types.Object.",
+          "side_effects": [
+            "Changes active selection state",
+            "Merges object data into one output object"
+          ],
+          "notes": "Use only after constructing the individual primitives that belong together."
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "description": "Create one facade opening surround from explicit bounds",
+      "code": "frame = new_bbox(0.9, 4.1, -0.08, 0.33, 1.0, 2.8)"
+    },
+    {
+      "description": "Add a vertical gable above the front wall (base along X at z=6, apex up Z, depth Y)",
+      "code": "gable = new_tri_prism(0.0, 0.0, 6.0, 4.0, 0.0, 6.0, height=1.5, thickness=0.3)"
+    },
+    {
+      "description": "Add a side-wall awning with apex pointing in +X (base along Y, depth through Z)",
+      "code": "awning = new_tri_prism(2.0, 1.0, 3.0, 2.0, 3.0, 3.0, height=0.6, thickness=0.1, rise_x=1, rise_y=0, rise_z=0)"
+    },
+    {
+      "description": "Add a true semicircular arch over a window (height = base_length / 2 = 0.6)",
+      "code": "arch = new_half_cylinder(1.0, 0.0, 2.8, 2.2, 0.0, 2.8, height=0.6, thickness=0.15, segments=24)"
+    },
+    {
+      "description": "Add a squat segmental arch (rise smaller than half the diameter)",
+      "code": "seg_arch = new_half_cylinder(1.0, 0.0, 2.8, 2.2, 0.0, 2.8, height=0.35, thickness=0.15, segments=20)"
+    },
+    {
+      "description": "Add an arched dormer on a side wall (diameter along Y, dome up Z, depth +X)",
+      "code": "dormer = new_half_cylinder(5.0, 1.0, 4.0, 5.0, 2.5, 4.0, height=0.6, thickness=0.4, rise_z=1, segments=20)"
+    },
+    {
+      "description": "Merge several facade strips into one wall-border object",
+      "code": "border = join_objects([top_strip, bottom_strip, left_strip, right_strip])"
+    }
+  ]
+}

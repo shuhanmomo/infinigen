@@ -162,7 +162,7 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
         wy1 = y1 + self.opening_protrusion
 
         self._add_named_box(
-            parts, specs, "window", wx0, wx1, wy0, wy1, wz0, wz1,
+            parts, specs, "window_panel", wx0, wx1, wy0, wy1, wz0, wz1,
             rot_k, tx, ty,
         )
 
@@ -332,7 +332,7 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
             f.write(f"# wall_material={meta['wall_material']}\n\n")
 
             counter = {}
-            for semantic in ["wall", "window", "lintel", "sill_course",
+            for semantic in ["wall", "window_panel", "lintel", "sill_course",
                              "door", "roof"]:
                 for bounds in parts.get(semantic, []):
                     idx = counter.get(semantic, 0)
@@ -389,27 +389,33 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
     def export_refactored_script(self, output_path: str) -> str:
         """Emit a ``Generator`` class that calls codebank helpers.
 
-        Layout mirrors ``chair_logged_v2.export_refactored_script``:
+        The class is intentionally minimal: only ``__init__`` and
+        ``generate()``. State the codebank helpers need (counters, label map,
+        and per-facade params) is bundled into two local dicts at the top of
+        ``generate()`` so each call site reads cleanly without dragging a
+        long ``kw=self.kw`` tail.
 
             class Generator:
                 def __init__(self):
                     self.<param> = <inline value>
                     ...
-                    self._obj_to_label = {}
-                    self._label_counters = {}
 
                 def generate(self):
                     parts = []
-                    _add_named_box(parts, "wall", ..., **kw)
-                    _build_facade(parts, ..., **kw)
-                    ...
+                    box_kw = dict(...)
+                    facade_kw = dict(...)
+                    facade_configs = [...]
+                    for x_start, x_end, kind, transform in facade_configs:
+                        rot_k, tx, ty = transform
+                        _add_named_box(parts, "wall", ..., **box_kw)
+                        _build_facade(parts, ..., **facade_kw)
+                    _add_named_box(parts, "roof", ..., **box_kw)
                     return parts
 
-        The codebank functions are produced by the AST extractor in
+        The codebank helpers are produced by the AST extractor in
         ``infinigen_examples/generate_logged_assets.py`` from
-        ``BuildingFacadeMatFactory``. Their signatures expose every state
-        attribute as a keyword-only parameter, so each helper invocation
-        passes state explicitly via ``kw=self.kw``.
+        ``BuildingFacadeMatFactory``; their keyword-only parameter blocks
+        determine the kwarg lists below.
         """
         if self._semantic_specs is None:
             raise RuntimeError(
@@ -429,32 +435,26 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
 
         # Kwarg lists must mirror the keyword-only blocks emitted by the AST
         # extractor for ``BuildingFacadeMatFactory``. If a self.X reference is
-        # added/removed inside one of these methods, regenerate codebank.py and
-        # update the matching list here.
-        helper_kwargs = {
-            "_add_named_box": [
-                "_label_counters", "_obj_to_label",
-            ],
-            "_build_facade": [
-                "_label_counters", "_obj_to_label",
-                "door_h", "door_w", "floor_h", "ground_h",
-                "lintel_h", "lintel_overhang", "n_upper_floors",
-                "opening_protrusion", "side_margin", "sill",
-                "sill_course_h", "tile_w", "win_h", "win_pad_frac",
-                "win_top_gap",
-            ],
-        }
+        # added/removed inside one of these methods, regenerate codebank.py
+        # and update the matching list here.
+        box_kwargs = ["_label_counters", "_obj_to_label"]
+        facade_kwargs = [
+            "_label_counters", "_obj_to_label",
+            "door_h", "door_w", "floor_h", "ground_h",
+            "lintel_h", "lintel_overhang", "n_upper_floors",
+            "opening_protrusion", "side_margin", "sill",
+            "sill_course_h", "tile_w", "win_h", "win_pad_frac",
+            "win_top_gap",
+        ]
 
-        def call(helper: str, *positional: str) -> str:
-            kws = ", ".join(f"{n}=self.{n}" for n in helper_kwargs[helper])
-            if positional:
-                return f"{helper}({', '.join(positional)}, {kws})"
-            return f"{helper}({kws})"
+        def kw_dict_literal(kwargs: list) -> str:
+            return "dict(" + ", ".join(f"{k}=self.{k}" for k in kwargs) + ")"
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("from codebank import _add_named_box, _build_facade\n\n\n")
             f.write("class Generator:\n\n")
 
+            # __init__: inline every reproducible parameter.
             f.write("    def __init__(self):\n")
             for k, v in p.items():
                 f.write(f"        self.{k} = {fmt(v)}\n")
@@ -462,47 +462,58 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
             f.write("        self._label_counters = {}\n")
             f.write("\n")
 
+            # generate(): mirrors create_asset's structure exactly. State for
+            # the codebank helpers lives in two local dicts (no extra
+            # methods on the class).
             f.write("    def generate(self):\n")
             f.write("        parts = []\n")
-
-            # The four facade walls. Side walls are inset by self.depth on
-            # both ends so corners are owned by front/back walls (no overlap).
-            facades = [
-                ("0.0", "self.front_width", '"FRONT"', "(0, 0.0, 0.0)"),
-                ("0.0", "self.front_width", '"SIDE"',
-                 "(2, self.front_width, self.side_width)"),
-                ("self.depth", "self.side_width - self.depth", '"SIDE"',
-                 "(1, self.front_width, 0.0)"),
-                ("self.depth", "self.side_width - self.depth", '"SIDE"',
-                 "(3, 0.0, self.side_width)"),
-            ]
-            for x_start, x_end, kind, transform in facades:
-                rot_k, _, _ = transform.strip("()").split(",")
-                tx_ty = transform.strip("()").split(",")
-                tx = tx_ty[1].strip()
-                ty = tx_ty[2].strip()
-                wall_call = call(
-                    "_add_named_box",
-                    "parts", '"wall"', x_start, x_end,
-                    "0.0", "self.depth", "0.0", "self.height",
-                    rot_k.strip(), tx, ty,
-                )
-                f.write(f"        {wall_call}\n")
-                facade_call = call(
-                    "_build_facade",
-                    "parts", x_start, x_end, kind,
-                    "0.0", "self.depth", transform,
-                )
-                f.write(f"        {facade_call}\n")
-
-            roof_call = call(
-                "_add_named_box",
-                "parts", '"roof"', "0.0", "self.front_width",
-                "0.0", "self.side_width", "self.height",
-                "self.height + self.roof_thickness",
+            f.write(f"        box_kw = {kw_dict_literal(box_kwargs)}\n")
+            f.write(f"        facade_kw = {kw_dict_literal(facade_kwargs)}\n\n")
+            f.write(
+                "        # Side walls are inset by self.depth on both ends so the four walls\n"
+                "        # meet at the corners without overlap. Front/back walls own the\n"
+                "        # corner volumes; the side walls stop short of them.\n"
             )
-            f.write(f"        {roof_call}\n")
-            f.write("        return parts\n\n\n")
+            f.write("        facade_configs = [\n")
+            f.write('            (0.0, self.front_width, "FRONT", (0, 0.0, 0.0)),\n')
+            f.write(
+                '            (0.0, self.front_width, "SIDE",'
+                ' (2, self.front_width, self.side_width)),\n'
+            )
+            f.write(
+                '            (self.depth, self.side_width - self.depth, "SIDE",'
+                ' (1, self.front_width, 0.0)),\n'
+            )
+            f.write(
+                '            (self.depth, self.side_width - self.depth, "SIDE",'
+                ' (3, 0.0, self.side_width)),\n'
+            )
+            f.write("        ]\n\n")
+
+            f.write(
+                "        for x_start, x_end, kind, transform in facade_configs:\n"
+                "            rot_k, tx, ty = transform\n"
+                "            _add_named_box(\n"
+                '                parts, "wall",\n'
+                "                x_start, x_end, 0.0, self.depth, 0.0, self.height,\n"
+                "                rot_k, tx, ty,\n"
+                "                **box_kw,\n"
+                "            )\n"
+                "            _build_facade(\n"
+                "                parts, x_start, x_end, kind, 0.0, self.depth, transform,\n"
+                "                **facade_kw,\n"
+                "            )\n\n"
+            )
+
+            f.write(
+                "        _add_named_box(\n"
+                '            parts, "roof",\n'
+                "            0.0, self.front_width, 0.0, self.side_width,\n"
+                "            self.height, self.height + self.roof_thickness,\n"
+                "            **box_kw,\n"
+                "        )\n"
+                "        return parts\n\n\n"
+            )
 
             f.write('if __name__ == "__main__":\n')
             f.write("    Generator().generate()\n")

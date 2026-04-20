@@ -137,7 +137,7 @@ class BuildingFacadeMatFactory(AssetFactory):
         wy1 = y1 + self.opening_protrusion
 
         self._add_named_box(
-            parts, "window", wx0, wx1, wy0, wy1, wz0, wz1,
+            parts, "window_panel", wx0, wx1, wy0, wy1, wz0, wz1,
             rot_k, tx, ty,
         )
 

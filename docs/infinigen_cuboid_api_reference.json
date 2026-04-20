@@ -1,0 +1,83 @@
+{
+  "metadata": {
+    "title": "Infinigen Cuboid API Reference",
+    "description": "Facade-focused DSL summary for bbox-driven primitive programs. Keep the prompt surface on cuboid composition helpers instead of the broader curve/modifier stack.",
+    "version": "1.0"
+  },
+  "general_notes": {
+    "replay_context": [
+      "Facade primitives in this family are bbox-first and usually assemble geometry by placing axis-aligned boxes.",
+      "Use direct cuboid composition helpers before considering broader Infinigen curve or modifier APIs."
+    ],
+    "script_notes": [
+      "Prefer `new_bbox(...)` for walls, windows, lintels, sills, jambs, and other panel-like elements.",
+      "Use `join_objects(...)` only when the primitive script needs one merged object after constructing multiple bbox pieces."
+    ],
+    "imports": [
+      "import bpy",
+      "from infinigen.assets.utils.object import join_objects, new_bbox"
+    ]
+  },
+  "modules": {
+    "infinigen.assets.utils.object": {
+      "functions": [
+        {
+          "name": "new_bbox",
+          "signature": "new_bbox(xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float)",
+          "purpose": "Create one axis-aligned cuboid from explicit min/max bounds. This is the primary facade-building primitive.",
+          "inputs": [
+            {
+              "name": "xmin, xmax",
+              "type": "float",
+              "description": "X extents for the box."
+            },
+            {
+              "name": "ymin, ymax",
+              "type": "float",
+              "description": "Y extents for the box."
+            },
+            {
+              "name": "zmin, zmax",
+              "type": "float",
+              "description": "Z extents for the box."
+            }
+          ],
+          "returns": "bpy.types.Object (MESH) for the cuboid, linked to the active scene.",
+          "side_effects": [
+            "Creates a new object",
+            "Applies the transform so the mesh matches the requested bbox"
+          ],
+          "notes": "Use this directly for facade panels and openings. Do not replace it with unrelated curve helpers."
+        },
+        {
+          "name": "join_objects",
+          "signature": "join_objects(objs: bpy.types.Object | Sequence[bpy.types.Object])",
+          "purpose": "Merge several bbox-built pieces into one object when the primitive script needs a combined facade element.",
+          "inputs": [
+            {
+              "name": "objs",
+              "type": "object or sequence of objects",
+              "description": "Objects to merge into the active object."
+            }
+          ],
+          "returns": "The merged bpy.types.Object.",
+          "side_effects": [
+            "Changes active selection state",
+            "Merges object data into one output object"
+          ],
+          "notes": "Use only after constructing the individual cuboids that belong together."
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "description": "Create one facade opening surround from explicit bounds",
+      "code": "frame = new_bbox(0.9, 4.1, -0.08, 0.33, 1.0, 2.8)"
+    },
+    {
+      "description": "Merge several facade strips into one wall-border object",
+      "code": "border = join_objects([top_strip, bottom_strip, left_strip, right_strip])"
+    }
+  ]
+}
