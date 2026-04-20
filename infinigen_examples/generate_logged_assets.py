@@ -14,6 +14,10 @@ from infinigen.core.util.math import FixedSeed
 
 # Logged factories
 from infinigen.assets.building_facade_logged import BuildingFacadeFactoryLogged
+from infinigen.assets.building_facade_decor_logic_logged import (
+    BuildingFacadeDecorFactoryLogged,
+)
+from infinigen.assets.building_facade_mat_logged import BuildingFacadeMatFactoryLogged
 from infinigen.assets.objects.seating.chairs.chair_logged import ChairFactoryLogged
 
 
@@ -23,7 +27,12 @@ def make_args():
         "--factory",
         type=str,
         default="chair",
-        choices=["chair", "building_facade"],
+        choices=[
+            "chair",
+            "building_facade",
+            "building_facade_decor",
+            "building_facade_mat",
+        ],
         help="Which logged factory to run",
     )
     parser.add_argument("--seeds", type=int, nargs="*", default=[41, 42])
@@ -56,6 +65,14 @@ def _factory_spec(factory_name: str):
         return ChairFactoryLogged, "chair_sanitized.py", True
     if factory_name == "building_facade":
         return BuildingFacadeFactoryLogged, "building_facade_sanitized.py", False
+    if factory_name == "building_facade_decor":
+        return (
+            BuildingFacadeDecorFactoryLogged,
+            "building_facade_decor_sanitized.py",
+            False,
+        )
+    if factory_name == "building_facade_mat":
+        return BuildingFacadeMatFactoryLogged, "building_facade_mat_sanitized.py", False
     raise ValueError(f"Unsupported factory {factory_name}")
 
 
@@ -352,11 +369,13 @@ def finalize_parts(parts):
 
 def main(args):
     if args.output_root is None:
-        args.output_root = (
-            Path("outputs/chairs")
-            if args.factory == "chair"
-            else Path("outputs/building_facade_logged")
-        )
+        defaults = {
+            "chair": "outputs/chairs",
+            "building_facade": "outputs/building_facade_logged",
+            "building_facade_decor": "outputs/building_facade_decor_logged",
+            "building_facade_mat": "outputs/building_facade_mat_logged",
+        }
+        args.output_root = Path(defaults.get(args.factory, "outputs/assets"))
 
     # Load gin configs so blender/cycles configuration has required parameters
     init.apply_gin_configs(
