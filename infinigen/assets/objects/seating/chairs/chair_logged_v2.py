@@ -1103,67 +1103,122 @@ class ChairFactoryLogged(AssetFactory):
         return output_path
 
     def export_refactored_script(self, output_path: str) -> str:
-        """Export a refactored-style script showing helper calls with inline values.
+        """Export a refactored-style script as a `Generator` class.
 
-        This produces a main script with inline parameter values (not declarations),
-        suitable for fair LOC comparison with primitive scripts.
+        Layout:
+            class Generator:
+                def __init__(self):
+                    self.<param> = <inline value>   # all chair parameters
+                    ...
+
+                def generate(self):
+                    helper_call(...)               # mirrors chair.py.create_asset
+                    ...
+
+        Helpers are imported from `codebank.py` (produced by the AST-based
+        extractor in `infinigen_examples/generate_logged_assets.py`). Their
+        signatures are kwarg-only, so every helper invocation passes state as
+        explicit `kw=self.kw` so it stays readable and survives signature
+        re-ordering when the codebank is regenerated.
         """
         p = self._get_params_dict()
 
         def fmt(v):
             if isinstance(v, bool):
                 return str(v)
-            elif isinstance(v, str):
+            if isinstance(v, str):
                 return f'"{v}"'
-            elif isinstance(v, (list, tuple)):
+            if isinstance(v, (list, tuple)):
                 return str(list(v))
             return str(v)
 
+        # Kwarg lists for each codebank helper. These mirror the keyword-only
+        # parameter blocks emitted by the AST extractor for `ChairFactory`. If
+        # `chair.py` adds/removes a `self.X` reference inside one of these
+        # methods, regenerate the codebank and update the matching list here.
+        helper_kwargs = {
+            "make_seat": [
+                "bevel_width", "is_seat_round", "is_seat_subsurf", "seat_back",
+                "seat_front", "seat_mid", "seat_mid_x", "seat_mid_z", "size",
+                "thickness", "width",
+            ],
+            "make_legs": [
+                "leg_height", "leg_thickness", "leg_type", "leg_x_offset",
+                "leg_y_offset", "limb_profile", "seat_back", "size", "width",
+            ],
+            "make_backs": [
+                "back_height", "back_x_offset", "back_y_offset", "leg_thickness",
+                "leg_type", "limb_profile", "seat_back", "size", "width",
+            ],
+            "make_leg_decors": [
+                "bevel_width", "has_leg_x_bar", "has_leg_y_bar", "is_leg_round",
+                "leg_height", "leg_offset_bar", "leg_thickness",
+            ],
+            "make_back_decors": [
+                "back_height", "back_partial_scale", "back_profile",
+                "back_thickness", "back_type", "back_vertical_cuts",
+                "bevel_width", "thickness",
+            ],
+            "make_arms": [
+                "arm_height", "arm_mid", "arm_profile", "arm_thickness",
+                "arm_y", "arm_z", "is_leg_round",
+            ],
+            "_m_solidify": [
+                "bevel_width", "is_leg_round", "leg_thickness",
+            ],
+        }
+
+        def call(helper: str, *positional: str) -> str:
+            kws = ", ".join(f"{n}=self.{n}" for n in helper_kwargs[helper])
+            if positional:
+                return f"{helper}({', '.join(positional)}, {kws})"
+            return f"{helper}({kws})"
+
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write("import bpy\n")
+            # Header: imports.
             f.write("import numpy as np\n")
+            f.write("from infinigen.assets.utils.object import join_objects\n")
+            f.write("from infinigen.core.util import blender as butil\n")
             f.write("from codebank import (\n")
             f.write("    make_seat, make_legs, make_backs,\n")
             f.write("    make_leg_decors, make_back_decors, make_arms,\n")
-            f.write("    solidify_limb, finalize_parts,\n")
-            f.write(")\n\n")
+            f.write("    _m_solidify,\n")
+            f.write(")\n\n\n")
 
-            # Main script with inline values
-            f.write("parts = []\n")
+            # Class.
+            f.write("class Generator:\n\n")
+
+            # __init__ : parameter declarations.
+            f.write("    def __init__(self):\n")
+            for k, v in p.items():
+                f.write(f"        self.{k} = {fmt(v)}\n")
+            f.write("\n")
+
+            # generate : mirrors chair.py.create_asset orchestration.
+            f.write("    def generate(self):\n")
+            f.write(f"        obj = {call('make_seat')}\n")
+            f.write(f"        legs = {call('make_legs')}\n")
+            f.write(f"        backs = {call('make_backs')}\n")
+            f.write("        parts = [obj] + legs + backs\n")
+            f.write(f"        parts.extend({call('make_leg_decors', 'legs')})\n")
+            f.write("        if self.has_arm:\n")
             f.write(
-                f"seat = make_seat({fmt(p['width'])}, {fmt(p['size'])}, {fmt(p['thickness'])}, {fmt(p['bevel_width'])}, {fmt(p['seat_back'])}, {fmt(p['seat_mid'])}, {fmt(p['seat_mid_x'])}, {fmt(p['seat_mid_z'])}, {fmt(p['seat_front'])}, {fmt(p['is_seat_round'])}, {fmt(p['is_seat_subsurf'])})\n"
+                f"            parts.extend({call('make_arms', 'obj', 'backs')})\n"
             )
-            f.write("parts.append(seat)\n")
+            f.write(f"        parts.extend({call('make_back_decors', 'backs')})\n")
+            f.write("        for leg in legs:\n")
+            f.write(f"            {call('_m_solidify', 'leg', '2')}\n")
+            f.write("        for back in backs:\n")
             f.write(
-                f"legs = make_legs({fmt(p['width'])}, {fmt(p['size'])}, {fmt(p['seat_back'])}, {fmt(p['leg_x_offset'])}, {fmt(p['leg_y_offset'])}, {fmt(p['leg_height'])}, {fmt(p['leg_type'])}, {fmt(p['limb_profile'])}, {fmt(p['leg_thickness'])})\n"
+                f"            {call('_m_solidify', 'back', '2', 'self.back_thickness')}\n"
             )
-            f.write("parts.extend(legs)\n")
-            f.write(
-                f"backs = make_backs({fmt(p['width'])}, {fmt(p['seat_back'])}, {fmt(p['back_x_offset'])}, {fmt(p['back_y_offset'])}, {fmt(p['back_height'])}, {fmt(p['leg_type'])}, {fmt(p['limb_profile'])}, {fmt(p['leg_thickness'])}, {fmt(p['size'])})\n"
-            )
-            f.write("parts.extend(backs)\n")
-            f.write(
-                f"leg_decors = make_leg_decors(legs, {fmt(p['has_leg_x_bar'])}, {fmt(p['has_leg_y_bar'])}, {fmt(p['leg_height'])}, {fmt(p['leg_offset_bar'])}, {fmt(p['leg_thickness'])}, {fmt(p['is_leg_round'])}, {fmt(p['bevel_width'])})\n"
-            )
-            f.write("parts.extend(leg_decors)\n")
-            if p["has_arm"]:
-                f.write(
-                    f"arms = make_arms(seat, backs, {fmt(p['arm_thickness'])}, {fmt(p['arm_height'])}, {fmt(p['arm_y'])}, {fmt(p['arm_z'])}, {fmt(p['arm_mid'])}, {fmt(p['arm_profile'])}, {fmt(p['is_leg_round'])}, {fmt(p['bevel_width'])})\n"
-                )
-                f.write("parts.extend(arms)\n")
-            f.write(
-                f"back_decors = make_back_decors(backs, {fmt(p['back_thickness'])}, {fmt(p['thickness'])}, {fmt(p['back_profile'])}, {fmt(p['back_height'])}, {fmt(p['back_type'])}, {fmt(p['back_vertical_cuts'])}, {fmt(p['back_partial_scale'])}, {fmt(p['bevel_width'])}, {fmt(p['is_leg_round'])})\n"
-            )
-            f.write("parts.extend(back_decors)\n")
-            f.write("for leg in legs:\n")
-            f.write(
-                f"    solidify_limb(leg, 2, {fmt(p['leg_thickness'])}, {fmt(p['is_leg_round'])}, {fmt(p['bevel_width'])})\n"
-            )
-            f.write("for back in backs:\n")
-            f.write(
-                f"    solidify_limb(back, 2, {fmt(p['back_thickness'])}, {fmt(p['is_leg_round'])}, {fmt(p['bevel_width'])})\n"
-            )
-            f.write("finalize_parts(parts)\n")
+            f.write("        obj = join_objects(parts)\n")
+            f.write("        obj.rotation_euler.z += np.pi / 2\n")
+            f.write("        butil.apply_transform(obj)\n")
+            f.write("        return obj\n\n\n")
+
+            f.write('if __name__ == "__main__":\n')
+            f.write("    Generator().generate()\n")
 
         return output_path
 

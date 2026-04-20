@@ -1,4 +1,8 @@
 import argparse
+import ast
+import copy
+import importlib
+import inspect
 import os
 from pathlib import Path
 
@@ -68,7 +72,7 @@ def _factory_spec(factory_name: str):
     if factory_name == "chair":
         return ChairFactoryLogged, "chair_sanitized.py", True
     if factory_name == "chair_v2":
-        return ChairFactoryLoggedV2, "chair_sanitized.py", False
+        return ChairFactoryLoggedV2, "chair_sanitized.py", True
     if factory_name == "building_facade":
         return BuildingFacadeFactoryLogged, "building_facade_sanitized.py", False
     if factory_name == "building_facade_decor":
@@ -142,234 +146,351 @@ def generate_one(seed: int, output_root: Path):
         print(f"Saved: {blend_path}")
 
 
-def export_codebank(output_path: Path):
-    """Export Infinigen chair helper functions as a codebank.py file."""
-    codebank_content = '''"""Infinigen Chair Helper Functions (Codebank).
+# --------------------------------------------------------------------------- #
+# Codebank extraction: take an original (non-logged) factory class and emit a
+# codebank.py whose helper methods have been turned into standalone functions.
+# --------------------------------------------------------------------------- #
 
-This file contains the high-level helper functions from the Infinigen
-ChairFactory, extracted as standalone functions for evaluator comparison.
-"""
+# Per-factory mapping: factory_name -> (module path, class name, helper-method
+# skip set). The skip set lists method names that are NOT helpers (i.e. lifecycle
+# / orchestration entry points) and therefore should not appear in the codebank.
+_CODEBANK_SOURCES: dict = {
+    "chair": (
+        "infinigen.assets.objects.seating.chairs.chair",
+        "ChairFactory",
+        {
+            "__init__", "post_init",
+            "create_asset", "create_placeholder",
+            "spawn_asset", "spawn_placeholder",
+            "finalize_assets",
+        },
+    ),
+    "chair_v2": (
+        "infinigen.assets.objects.seating.chairs.chair",
+        "ChairFactory",
+        {
+            "__init__", "post_init",
+            "create_asset", "create_placeholder",
+            "spawn_asset", "spawn_placeholder",
+            "finalize_assets",
+        },
+    ),
+    "building_facade": (
+        "infinigen.assets.building_facade",
+        "BuildingFacadeFactory",
+        {
+            "__init__",
+            "create_asset", "create_placeholder",
+            "spawn_asset", "spawn_placeholder",
+            "finalize_assets", "write_obj_to_label",
+        },
+    ),
+    "building_facade_decor": (
+        "infinigen.assets.building_facade_decor_logic",
+        "BuildingFacadeDecorFactory",
+        {
+            "__init__",
+            "create_asset", "create_placeholder",
+            "spawn_asset", "spawn_placeholder",
+            "finalize_assets", "write_obj_to_label",
+        },
+    ),
+    "building_facade_mat": (
+        "infinigen.assets.building_facade_mat",
+        "BuildingFacadeMatFactory",
+        {
+            "__init__",
+            "create_asset", "create_placeholder",
+            "spawn_asset", "spawn_placeholder",
+            "finalize_assets", "write_obj_to_label",
+        },
+    ),
+}
 
-import bpy
-import numpy as np
-from numpy.random import uniform
-from infinigen.assets.utils.decorate import (
-    write_attribute, write_co, read_co, read_edge_center,
-    read_edge_direction, remove_edges, remove_vertices,
-    select_edges, solidify, subsurf,
-)
-from infinigen.assets.utils.draw import bezier_curve, align_bezier
-from infinigen.assets.utils.object import join_objects, new_bbox
-from infinigen.assets.utils.nodegroup import geo_radius
-from infinigen.core.util import blender as butil
-from infinigen.core import surface
-from infinigen.core.util.blender import deep_clone_obj
+
+class _SelfAnalyzer(ast.NodeVisitor):
+    """Walks a method body to collect:
+    - `self_attrs`: data attributes referenced via `self.X` (excluding intra-
+      class method calls)
+    - `called_methods`: names of intra-class methods invoked via `self.X(...)`
+
+    The two are used together to compute, for each method, the *transitive*
+    set of state it (and its callees) need so the extracted standalone
+    functions can forward state when calling each other.
+    """
+
+    def __init__(self, method_names: set):
+        self._method_names = method_names
+        self.self_attrs: set = set()
+        self.called_methods: set = set()
+
+    def visit_Call(self, node: ast.Call):
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+            and node.func.attr in self._method_names
+        ):
+            self.called_methods.add(node.func.attr)
+            # Visit args / keywords but skip node.func so we don't also count
+            # the method reference as a data attribute.
+            for a in node.args:
+                self.visit(a)
+            for k in node.keywords:
+                self.visit(k.value)
+            return
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute):
+        if isinstance(node.value, ast.Name) and node.value.id == "self":
+            attr = node.attr
+            if attr not in self._method_names:
+                self.self_attrs.add(attr)
+        self.generic_visit(node)
 
 
-def make_seat(width, size, thickness, bevel_width, seat_back, seat_mid,
-              seat_mid_x, seat_mid_z, seat_front, is_seat_round, is_seat_subsurf):
-    """Create the chair seat."""
-    x_anchors = np.array([0, 0.1, 1, seat_mid_x, seat_back, 0]) * width / 2
-    y_anchors = np.array([-seat_front, -seat_front, -1, -seat_mid, 0, 0]) * size
-    z_anchors = np.array([0, 0, 0, seat_mid_z, 0, 0]) * thickness
-    vector_locations = [4] if is_seat_round else [2, 4]
-    obj = bezier_curve((x_anchors, y_anchors, z_anchors), vector_locations)
-    butil.modify_mesh(obj, "MIRROR")
-    with butil.ViewportMode(obj, "EDIT"):
-        bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.mesh.fill_grid(use_interp_simple=True)
-    butil.modify_mesh(obj, "SOLIDIFY", thickness=thickness, offset=0)
-    subsurf(obj, 1, not is_seat_subsurf)
-    butil.modify_mesh(obj, "BEVEL", width=bevel_width, segments=8)
-    return obj
+class _SelfRewriter(ast.NodeTransformer):
+    """Rewrite `self.X` accesses inside a method body.
+
+    - `self.X(...)` (intra-class method call) becomes `<rename[X]>(...)`, and
+      we append explicit `kw=kw` forwarding for every state attribute the
+      callee needs (computed as `transitive_attrs[X]`). The caller is
+      guaranteed to have those names in scope because its own signature
+      includes the union of all transitive state.
+    - `self.X` (data load) becomes a bare `X` reference.
+    - `self.X` (method ref without call) becomes a bare renamed reference;
+      no auto-forwarding is possible here so the user must wrap manually.
+    """
+
+    def __init__(
+        self,
+        method_names: set,
+        rename: dict,
+        transitive_attrs: dict,
+    ):
+        self._method_names = method_names
+        self._rename = rename
+        self._transitive_attrs = transitive_attrs
+
+    def visit_Call(self, node: ast.Call):
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+            and node.func.attr in self._method_names
+        ):
+            attr = node.func.attr
+            new_func = ast.copy_location(
+                ast.Name(id=self._rename.get(attr, attr), ctx=ast.Load()),
+                node.func,
+            )
+            new_args = [self.visit(copy.deepcopy(a)) for a in node.args]
+            already_kw = {k.arg for k in node.keywords if k.arg is not None}
+            new_kws = [
+                ast.keyword(arg=k.arg, value=self.visit(copy.deepcopy(k.value)))
+                for k in node.keywords
+            ]
+            for state in sorted(self._transitive_attrs.get(attr, set())):
+                if state in already_kw:
+                    continue
+                new_kws.append(ast.keyword(
+                    arg=state,
+                    value=ast.Name(id=state, ctx=ast.Load()),
+                ))
+            return ast.copy_location(
+                ast.Call(func=new_func, args=new_args, keywords=new_kws),
+                node,
+            )
+        return self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute):
+        if isinstance(node.value, ast.Name) and node.value.id == "self":
+            attr = node.attr
+            if attr in self._method_names:
+                return ast.copy_location(
+                    ast.Name(id=self._rename.get(attr, attr), ctx=node.ctx),
+                    node,
+                )
+            return ast.copy_location(ast.Name(id=attr, ctx=node.ctx), node)
+        return self.generic_visit(node)
 
 
-def make_limb(leg_ends, leg_starts, leg_type, limb_profile, leg_thickness, size):
-    """Create limb objects (used for legs and backs)."""
-    objs = []
-    for leg_start, leg_end in zip(leg_starts, leg_ends):
-        if leg_type == "up-curved":
-            axes = [(0, 0, 1), None]
-            scale = [limb_profile, 1]
-        elif leg_type == "down-curved":
-            axes = [None, (0, 0, 1)]
-            scale = [1, limb_profile]
-        else:
-            axes = None
-            scale = None
-        obj = align_bezier(np.stack([leg_start, leg_end], -1), axes, scale)
-        obj.location = (
-            np.array([
-                1 if leg_start[0] < 0 else -1,
-                1 if leg_start[1] < -size / 2 else -1,
-                0,
-            ]) * leg_thickness / 2
+def _extract_codebank(source_path: Path, class_name: str, skip: set) -> str:
+    """Extract helper methods of `class_name` from `source_path` as standalone
+    functions, returning the full codebank.py source text."""
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    # 1. Collect top-level imports verbatim and their bound names (for collision
+    #    detection with class method names).
+    imports: list = []
+    imported_names: set = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imports.append(node)
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                imported_names.add(bound.split(".")[0])
+
+    # 2. Locate the factory class.
+    cls = next(
+        (
+            n for n in tree.body
+            if isinstance(n, ast.ClassDef) and n.name == class_name
+        ),
+        None,
+    )
+    if cls is None:
+        raise ValueError(f"Class {class_name!r} not found in {source_path}")
+
+    # 3. Inventory class-level statements: methods, plus any class-level
+    #    constant assignments to expose as module-level names.
+    methods = [n for n in cls.body if isinstance(n, ast.FunctionDef)]
+    method_names = {m.name for m in methods}
+
+    class_constants: list = []
+    for node in cls.body:
+        if isinstance(node, ast.Assign) and all(
+            isinstance(t, ast.Name) for t in node.targets
+        ):
+            class_constants.append(node)
+
+    # 4. Decide rename map: any extracted method whose name shadows an import
+    #    gets prefixed with `_m_` so the body's `self.X(...)` rewrite doesn't
+    #    accidentally call the imported helper of the same name.
+    rename = {
+        n: (f"_m_{n}" if n in imported_names else n) for n in method_names
+    }
+
+    # 5. Decide which methods to extract.
+    def _is_extractable(m: ast.FunctionDef) -> bool:
+        if m.name in skip or m.name.startswith("__"):
+            return False
+        if any(
+            isinstance(d, ast.Name) and d.id == "property"
+            for d in m.decorator_list
+        ):
+            return False
+        return True
+
+    extractable = [m for m in methods if _is_extractable(m)]
+
+    # 6. Pre-pass: per-method direct state + intra-class call graph.
+    direct_attrs: dict = {}
+    called: dict = {}
+    for m in extractable:
+        analyzer = _SelfAnalyzer(method_names)
+        for s in m.body:
+            analyzer.visit(s)
+        direct_attrs[m.name] = analyzer.self_attrs
+        called[m.name] = analyzer.called_methods
+
+    # 7. Fixed-point closure: a method's transitive state is its own direct
+    #    state plus the transitive state of every intra-class method it calls.
+    transitive_attrs: dict = {n: set(s) for n, s in direct_attrs.items()}
+    changed = True
+    while changed:
+        changed = False
+        for m_name, callees in called.items():
+            for c_name in callees:
+                if c_name not in transitive_attrs:
+                    continue
+                before = len(transitive_attrs[m_name])
+                transitive_attrs[m_name] |= transitive_attrs[c_name]
+                if len(transitive_attrs[m_name]) > before:
+                    changed = True
+
+    # 8. Emit pass: rewrite each method body and assemble its new signature.
+    extracted: list = []
+    for m in extractable:
+        extracted.append(_convert_method(
+            m, method_names, rename, transitive_attrs,
+        ))
+
+    if not extracted:
+        raise ValueError(
+            f"No extractable helper methods found on {class_name!r}; "
+            f"skip set may be too broad."
         )
-        butil.apply_transform(obj, True)
-        objs.append(obj)
-    return objs
+
+    # 6. Reassemble: imports + class constants + extracted functions.
+    body = list(imports) + list(class_constants) + extracted
+    new_module = ast.Module(body=body, type_ignores=[])
+    ast.fix_missing_locations(new_module)
+    code = ast.unparse(new_module)
+
+    header = (
+        f'"""Codebank for {class_name}.\n\n'
+        f"Auto-generated from {source_path.as_posix()} by\n"
+        f"infinigen_examples/generate_logged_assets.py. Helper methods have\n"
+        f"been converted to standalone functions: `self` is dropped, data\n"
+        f"attributes (self.X) become keyword-only parameters, and intra-class\n"
+        f"method calls (self.foo(...)) are rewritten to bare calls.\n"
+        f'"""\n\n'
+    )
+    return header + code + "\n"
 
 
-def make_legs(width, size, seat_back, leg_x_offset, leg_y_offset, leg_height,
-              leg_type, limb_profile, leg_thickness):
-    """Create the four chair legs."""
-    leg_starts = np.array([
-        [-seat_back, 0, 0], [-1, -1, 0], [1, -1, 0], [seat_back, 0, 0]
-    ]) * np.array([[width / 2, size, 0]])
-    leg_ends = leg_starts.copy()
-    leg_ends[[0, 1], 0] -= leg_x_offset
-    leg_ends[[2, 3], 0] += leg_x_offset
-    leg_ends[[0, 3], 1] += leg_y_offset[0]
-    leg_ends[[1, 2], 1] -= leg_y_offset[1]
-    leg_ends[:, -1] = -leg_height
-    return make_limb(leg_ends, leg_starts, leg_type, limb_profile, leg_thickness, size)
+def _convert_method(
+    method: ast.FunctionDef,
+    method_names: set,
+    rename: dict,
+    transitive_attrs: dict,
+) -> ast.FunctionDef:
+    """Convert one `def m(self, ...)` method into a standalone function.
 
-
-def make_backs(width, seat_back, back_x_offset, back_y_offset, back_height,
-               leg_type, limb_profile, leg_thickness, size):
-    """Create the two backrest posts."""
-    back_starts = np.array([[-seat_back, 0, 0], [seat_back, 0, 0]]) * width / 2
-    back_ends = back_starts.copy()
-    back_ends[:, 0] += np.array([back_x_offset, -back_x_offset])
-    back_ends[:, 1] = back_y_offset
-    back_ends[:, 2] = back_height
-    return make_limb(back_starts, back_ends, leg_type, limb_profile, leg_thickness, size)
-
-
-def make_leg_decors(legs, has_leg_x_bar, has_leg_y_bar, leg_height,
-                    leg_offset_bar, leg_thickness, is_leg_round, bevel_width):
-    """Create stretcher bars between legs."""
-    objs = []
-    if has_leg_x_bar:
-        z_height = -leg_height * uniform(*leg_offset_bar)
-        locs = []
-        for obj in legs:
-            co = read_co(obj)
-            locs.append(co[np.argmin(np.abs(co[:, -1] - z_height))])
-        bar1 = bezier_curve(np.stack([locs[0], locs[3]], -1))
-        bar2 = bezier_curve(np.stack([locs[1], locs[2]], -1))
-        for bar in [bar1, bar2]:
-            solidify_limb(bar, 0, leg_thickness, is_leg_round, bevel_width)
-        objs.extend([bar1, bar2])
-    if has_leg_y_bar:
-        z_height = -leg_height * uniform(*leg_offset_bar)
-        locs = []
-        for obj in legs:
-            co = read_co(obj)
-            locs.append(co[np.argmin(np.abs(co[:, -1] - z_height))])
-        bar1 = bezier_curve(np.stack([locs[0], locs[1]], -1))
-        bar2 = bezier_curve(np.stack([locs[2], locs[3]], -1))
-        for bar in [bar1, bar2]:
-            solidify_limb(bar, 1, leg_thickness, is_leg_round, bevel_width)
-        objs.extend([bar1, bar2])
-    return objs
-
-
-def make_back_decors(backs, back_thickness, thickness, back_profile, back_height,
-                     back_type, back_vertical_cuts, back_partial_scale, bevel_width, is_leg_round):
-    """Create backrest panel/bars."""
-    obj = join_objects([deep_clone_obj(b) for b in backs])
-    x, y, z = read_co(obj).T
-    x += np.where(x > 0, back_thickness / 2, -back_thickness / 2)
-    write_co(obj, np.stack([x, y, z], -1))
-    smoothness = uniform(0, 1)
-    profile_shape_factor = uniform(0, 0.4)
-    with butil.ViewportMode(obj, "EDIT"):
-        bpy.ops.mesh.select_mode(type="EDGE")
-        center = read_edge_center(obj)
-        for z_min, z_max in back_profile:
-            select_edges(obj, (z_min * back_height <= center[:, -1]) & (center[:, -1] <= z_max * back_height))
-            bpy.ops.mesh.bridge_edge_loops(number_cuts=64, interpolation="LINEAR",
-                                           smoothness=smoothness, profile_shape_factor=profile_shape_factor)
-        bpy.ops.mesh.select_loose()
-        bpy.ops.mesh.delete()
-    butil.modify_mesh(obj, "SOLIDIFY", thickness=np.minimum(thickness, back_thickness), offset=0)
-    butil.modify_mesh(obj, "BEVEL", width=bevel_width, segments=8)
-    parts = [obj]
-    if back_type == "vertical-bar":
-        other = join_objects([deep_clone_obj(b) for b in backs])
-        with butil.ViewportMode(other, "EDIT"):
-            bpy.ops.mesh.select_mode(type="EDGE")
-            bpy.ops.mesh.select_all(action="SELECT")
-            bpy.ops.mesh.bridge_edge_loops(number_cuts=back_vertical_cuts, interpolation="LINEAR",
-                                           smoothness=smoothness, profile_shape_factor=profile_shape_factor)
-            bpy.ops.mesh.select_all(action="INVERT")
-            bpy.ops.mesh.delete()
-            bpy.ops.mesh.select_all(action="SELECT")
-            bpy.ops.mesh.delete(type="ONLY_FACE")
-        remove_edges(other, np.abs(read_edge_direction(other)[:, -1]) < 0.5)
-        remove_vertices(other, lambda x, y, z: z < -thickness / 2)
-        remove_vertices(other, lambda x, y, z: z > (back_profile[0][0] + back_profile[0][1]) * back_height / 2)
-        solidify_limb(other, 2, back_thickness, is_leg_round, bevel_width)
-        parts.append(other)
-    elif back_type == "partial":
-        co = read_co(obj)
-        co[:, 1] *= back_partial_scale
-        write_co(obj, co)
-    return parts
-
-
-def make_arms(seat, backs, arm_thickness, arm_height, arm_y, arm_z, arm_mid,
-              arm_profile, is_leg_round, bevel_width):
-    """Create armrests."""
-    co = read_co(seat)
-    end = co[np.argmin(co[:, 0] - (np.abs(co[:, 1] + arm_y) < 0.02))]
-    end[0] += arm_thickness / 4
-    end_ = end.copy()
-    end_[0] = -end[0]
-    objs = []
-    co = read_co(backs[0])
-    start = co[np.argmin(co[:, 0] - (np.abs(co[:, -1] - arm_z) < 0.02))]
-    start[0] -= arm_thickness / 4
-    start_ = start.copy()
-    start_[0] = -start[0]
-    for start, end in zip([start, start_], [end, end_]):
-        mid = np.array([
-            end[0] + arm_mid[0] * (-1 if end[0] > 0 else 1),
-            end[1] + arm_mid[1],
-            start[2] + arm_mid[2],
-        ])
-        obj = align_bezier(
-            np.stack([start, mid, end], -1),
-            np.array([
-                [end[0] - start[0], end[1] - start[1], 0],
-                [0, 1 / np.sqrt(2), 1 / np.sqrt(2)],
-                [0, 0, 1],
-            ]),
-            [1, *arm_profile, 1],
+    The new signature is `<original positional args minus self>` plus a kwarg-
+    only block of every state attribute the method *transitively* needs (its
+    own self.X reads union those of every helper it calls). Body rewrites are
+    performed by `_SelfRewriter`, which also forwards state to intra-class
+    calls.
+    """
+    decorators = [
+        d for d in method.decorator_list
+        if not (
+            isinstance(d, ast.Name) and d.id in {"staticmethod", "classmethod"}
         )
-        if is_leg_round:
-            surface.add_geomod(obj, geo_radius, apply=True, input_args=[arm_thickness / 2, 32],
-                              input_kwargs={"to_align_tilt": False})
-        else:
-            with butil.ViewportMode(obj, "EDIT"):
-                bpy.ops.mesh.select_all(action="SELECT")
-                dx = arm_thickness if end[0] < 0 else -arm_thickness
-                bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value": (dx, 0, 0)})
-            butil.modify_mesh(obj, "SOLIDIFY", thickness=arm_height, offset=0)
-        objs.append(obj)
-    return objs
+    ]
+
+    new_args = copy.deepcopy(method.args)
+    if new_args.args and new_args.args[0].arg in {"self", "cls"}:
+        new_args.args = new_args.args[1:]
+
+    rewriter = _SelfRewriter(method_names, rename, transitive_attrs)
+    new_body = [rewriter.visit(copy.deepcopy(s)) for s in method.body]
+
+    # Don't double-add a kwarg if the original signature already has it as a
+    # positional parameter (rare but possible for facade-style helpers).
+    existing = {a.arg for a in new_args.args} | {a.arg for a in new_args.kwonlyargs}
+    for name in sorted(transitive_attrs.get(method.name, set())):
+        if name in existing:
+            continue
+        new_args.kwonlyargs.append(ast.arg(arg=name, annotation=None))
+        new_args.kw_defaults.append(None)
+
+    return ast.FunctionDef(
+        name=rename.get(method.name, method.name),
+        args=new_args,
+        body=new_body,
+        decorator_list=decorators,
+        returns=method.returns,
+        type_comment=None,
+    )
 
 
-def solidify_limb(obj, axis, thickness, is_leg_round, bevel_width):
-    """Apply solidify to a limb object."""
-    if is_leg_round:
-        solidify(obj, axis, thickness)
-        butil.modify_mesh(obj, "BEVEL", width=bevel_width, segments=8)
-    else:
-        surface.add_geomod(obj, geo_radius, apply=True, input_args=[thickness / 2, 32])
-    return obj
-
-
-def finalize_parts(parts):
-    """Apply final rotation and transforms to all parts."""
-    for o in parts:
-        o.rotation_euler.z += np.pi / 2
-        butil.apply_transform(o)
-    return parts
-'''
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(codebank_content)
+def export_codebank(output_path: Path, factory_name: str):
+    """Generate a codebank.py for the given factory by extracting helper
+    methods from the original (non-logged) generator class via AST."""
+    if factory_name not in _CODEBANK_SOURCES:
+        raise ValueError(
+            f"No codebank source registered for factory {factory_name!r}. "
+            f"Add an entry to _CODEBANK_SOURCES."
+        )
+    module_path, class_name, skip = _CODEBANK_SOURCES[factory_name]
+    module = importlib.import_module(module_path)
+    source_path = Path(inspect.getfile(module))
+    code = _extract_codebank(source_path, class_name, skip)
+    output_path.write_text(code, encoding="utf-8")
     print(f"Saved: {output_path}")
 
 
@@ -406,7 +527,7 @@ def main(args):
     # Export codebank if refactored mode is enabled
     if args.export_refactored:
         codebank_path = args.output_root / "codebank.py"
-        export_codebank(codebank_path)
+        export_codebank(codebank_path, args.factory)
 
     # Compute seed list based on either explicit --seeds or --start_seed/--variants
     seeds = list(args.seeds) if args.seeds else []
