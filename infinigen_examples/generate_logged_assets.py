@@ -69,20 +69,37 @@ def make_args():
 
 
 def _factory_spec(factory_name: str):
+    """Return (factory_cls, sanitized_script_name, supports_refactored, eval_subdir).
+
+    ``eval_subdir`` is the per-variant folder name where prog_gold_blender.py
+    and prog_pred_blender.py go when ``--export_refactored`` is set; ``None``
+    when the factory has no refactored exporter.
+    """
     if factory_name == "chair":
-        return ChairFactoryLogged, "chair_sanitized.py", True
+        return ChairFactoryLogged, "chair_sanitized.py", True, "Chair_infinigen"
     if factory_name == "chair_v2":
-        return ChairFactoryLoggedV2, "chair_sanitized.py", True
+        return ChairFactoryLoggedV2, "chair_sanitized.py", True, "Chair_infinigen"
     if factory_name == "building_facade":
-        return BuildingFacadeFactoryLogged, "building_facade_sanitized.py", False
+        return (
+            BuildingFacadeFactoryLogged,
+            "building_facade_sanitized.py",
+            False,
+            None,
+        )
     if factory_name == "building_facade_decor":
         return (
             BuildingFacadeDecorFactoryLogged,
             "building_facade_decor_sanitized.py",
             False,
+            None,
         )
     if factory_name == "building_facade_mat":
-        return BuildingFacadeMatFactoryLogged, "building_facade_mat_sanitized.py", False
+        return (
+            BuildingFacadeMatFactoryLogged,
+            "building_facade_mat_sanitized.py",
+            True,
+            "BuildingFacadeMat_infinigen",
+        )
     raise ValueError(f"Unsupported factory {factory_name}")
 
 
@@ -96,7 +113,9 @@ def generate_one(seed: int, output_root: Path):
     out_dir = output_root / f"variant_{seed:03d}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    factory_cls, script_name, supports_refactored = _factory_spec(ARGS.factory)
+    factory_cls, script_name, supports_refactored, eval_subdir = _factory_spec(
+        ARGS.factory
+    )
 
     # Generate asset
     fac = factory_cls(seed)
@@ -108,9 +127,12 @@ def generate_one(seed: int, output_root: Path):
         label_path = fac.write_obj_to_label(str(out_dir))
         print(f"Saved: {label_path}")
 
-    # Save .blend if requested
+    # Save .blend if requested. We also force-save when --export_refactored is
+    # set, because the codebank/refactored script pair is meaningless without
+    # the matching scene as a visual ground truth for evaluator comparison.
     blend_path = out_dir / "scene.blend"
-    if ARGS.save_blend:
+    save_blend = ARGS.save_blend or ARGS.export_refactored
+    if save_blend:
         butil.save_blend(blend_path, autopack=True)
 
     # Export sanitized script if requested
@@ -124,7 +146,7 @@ def generate_one(seed: int, output_root: Path):
         # Create evaluator-compatible structure: variant_{idx}/{subdir}/prog_*.py
         # prog_gold_blender.py = primitive script (sanitized)
         # prog_pred_blender.py = refactored script (helper calls)
-        eval_dir = out_dir / "Chair_infinigen"
+        eval_dir = out_dir / eval_subdir
         eval_dir.mkdir(parents=True, exist_ok=True)
 
         gold_path = eval_dir / "prog_gold_blender.py"
@@ -142,7 +164,7 @@ def generate_one(seed: int, output_root: Path):
             f"Skipping --export_refactored for {ARGS.factory}: refactored export not implemented."
         )
 
-    if ARGS.save_blend:
+    if save_blend:
         print(f"Saved: {blend_path}")
 
 

@@ -182,16 +182,18 @@ class BuildingFacadeMatFactory(AssetFactory):
                 rot_k, tx, ty,
             )
 
-    def _build_facade(self, parts, width, kind, y0, y1, transform):
+    def _build_facade(self, parts, x_start, x_end, kind, y0, y1, transform):
         floors = self._vertical_partition()
         for i, band_z in enumerate(floors):
             bays = self._repeat_to_fill(
-                self.side_margin, width - self.side_margin, self.tile_w,
+                x_start + self.side_margin,
+                x_end - self.side_margin,
+                self.tile_w,
             )
             if i == 0 and kind == "FRONT":
                 if not bays:
-                    span0 = self.side_margin
-                    span1 = max(self.side_margin, width - self.side_margin)
+                    span0 = x_start + self.side_margin
+                    span1 = max(span0, x_end - self.side_margin)
                     if self._valid_extent(span0, span1):
                         self._place_door(
                             parts, (span0, span1), band_z, y0, y1, transform,
@@ -213,21 +215,26 @@ class BuildingFacadeMatFactory(AssetFactory):
 
         parts = []
 
+        # Side walls are inset by self.depth on both ends so that the four walls
+        # meet at the corners without overlapping. The front/back walls own the
+        # corner volumes; the side walls stop short of them.
         facade_configs = [
-            (front_width, "FRONT", (0, 0.0, 0.0)),
-            (front_width, "SIDE", (2, front_width, side_width)),
-            (side_width, "SIDE", (1, front_width, 0.0)),
-            (side_width, "SIDE", (3, 0.0, side_width)),
+            (0.0, front_width, "FRONT", (0, 0.0, 0.0)),
+            (0.0, front_width, "SIDE", (2, front_width, side_width)),
+            (self.depth, side_width - self.depth, "SIDE", (1, front_width, 0.0)),
+            (self.depth, side_width - self.depth, "SIDE", (3, 0.0, side_width)),
         ]
 
-        for width, kind, transform in facade_configs:
+        for x_start, x_end, kind, transform in facade_configs:
             rot_k, tx, ty = transform
             self._add_named_box(
                 parts, "wall",
-                0.0, width, 0.0, self.depth, 0.0, self.height,
+                x_start, x_end, 0.0, self.depth, 0.0, self.height,
                 rot_k, tx, ty,
             )
-            self._build_facade(parts, width, kind, 0.0, self.depth, transform)
+            self._build_facade(
+                parts, x_start, x_end, kind, 0.0, self.depth, transform,
+            )
 
         self._add_named_box(
             parts, "roof",
@@ -235,13 +242,12 @@ class BuildingFacadeMatFactory(AssetFactory):
             self.height, self.height + self.roof_thickness,
         )
 
-        parent = bpy.data.objects.new("building_facade", None)
-        parent["wall_material"] = self.wall_material
-        bpy.context.collection.objects.link(parent)
-        for obj in parts:
-            obj.parent = parent
-
-        return parent
+        # NOTE: no parent linking. We return a small anchor empty so the
+        # AssetFactory framework (spawn_asset) has a single object to rename
+        # and position; the labeled parts stay as top-level scene objects.
+        anchor = bpy.data.objects.new("building_facade_mat", None)
+        bpy.context.collection.objects.link(anchor)
+        return anchor
 
     def write_obj_to_label(self, output_dir):
         os.makedirs(output_dir, exist_ok=True)

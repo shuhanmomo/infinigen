@@ -208,16 +208,18 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
                 rot_k, tx, ty,
             )
 
-    def _build_facade(self, parts, specs, width, kind, y0, y1, transform):
+    def _build_facade(self, parts, specs, x_start, x_end, kind, y0, y1, transform):
         floors = self._vertical_partition()
         for i, band_z in enumerate(floors):
             bays = self._repeat_to_fill(
-                self.side_margin, width - self.side_margin, self.tile_w,
+                x_start + self.side_margin,
+                x_end - self.side_margin,
+                self.tile_w,
             )
             if i == 0 and kind == "FRONT":
                 if not bays:
-                    span0 = self.side_margin
-                    span1 = max(self.side_margin, width - self.side_margin)
+                    span0 = x_start + self.side_margin
+                    span1 = max(span0, x_end - self.side_margin)
                     if self._valid_extent(span0, span1):
                         self._place_door(
                             parts, specs, (span0, span1),
@@ -247,26 +249,33 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
 
         front_width = float(params.get("front_width", np.random.uniform(12.0, 22.0)))
         side_width = float(params.get("side_width", np.random.uniform(10.0, 18.0)))
+        # Persist on self so export_refactored_script can bake them into the
+        # generator's __init__.
+        self.front_width = front_width
+        self.side_width = side_width
 
         parts = []
         specs = {}
 
+        # Side walls are inset by self.depth on both ends so the four walls
+        # meet at the corners without overlap. Front/back walls own the
+        # corners; side walls stop short of them.
         facade_configs = [
-            (front_width, "FRONT", (0, 0.0, 0.0)),
-            (front_width, "SIDE", (2, front_width, side_width)),
-            (side_width, "SIDE", (1, front_width, 0.0)),
-            (side_width, "SIDE", (3, 0.0, side_width)),
+            (0.0, front_width, "FRONT", (0, 0.0, 0.0)),
+            (0.0, front_width, "SIDE", (2, front_width, side_width)),
+            (self.depth, side_width - self.depth, "SIDE", (1, front_width, 0.0)),
+            (self.depth, side_width - self.depth, "SIDE", (3, 0.0, side_width)),
         ]
 
-        for width, kind, transform in facade_configs:
+        for x_start, x_end, kind, transform in facade_configs:
             rot_k, tx, ty = transform
             self._add_named_box(
                 parts, specs, "wall",
-                0.0, width, 0.0, self.depth, 0.0, self.height,
+                x_start, x_end, 0.0, self.depth, 0.0, self.height,
                 rot_k, tx, ty,
             )
             self._build_facade(
-                parts, specs, width, kind, 0.0, self.depth, transform,
+                parts, specs, x_start, x_end, kind, 0.0, self.depth, transform,
             )
 
         self._add_named_box(
@@ -275,11 +284,10 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
             self.height, self.height + self.roof_thickness,
         )
 
-        parent = bpy.data.objects.new("building_facade_logged", None)
-        parent["wall_material"] = self.wall_material
-        bpy.context.collection.objects.link(parent)
-        for obj in parts:
-            obj.parent = parent
+        # NOTE: no parent linking. Anchor empty exists only as a return value
+        # for the AssetFactory framework; labeled parts stay top-level.
+        anchor = bpy.data.objects.new("building_facade_mat_logged", None)
+        bpy.context.collection.objects.link(anchor)
 
         self._semantic_specs = {
             "meta": {
@@ -297,7 +305,7 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
             "parts": specs,
         }
 
-        return parent
+        return anchor
 
     # ------------------------------------------------------------------
     # Export helpers
@@ -320,19 +328,8 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
         parts = self._semantic_specs["parts"]
 
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write("import bpy\n")
             f.write("from infinigen.assets.utils.object import new_bbox\n\n")
-            f.write("# Logged facade script (each element is its own object)\n")
-            f.write(
-                f"# wall_material={meta['wall_material']}, "
-                f"front_width={meta['front_width']:.6f}, "
-                f"side_width={meta['side_width']:.6f}\n\n"
-            )
-            f.write(
-                'parent = bpy.data.objects.new("building_facade_logged", None)\n'
-            )
-            f.write(f'parent["wall_material"] = "{meta["wall_material"]}"\n')
-            f.write("bpy.context.collection.objects.link(parent)\n\n")
+            f.write(f"# wall_material={meta['wall_material']}\n\n")
 
             counter = {}
             for semantic in ["wall", "window", "lintel", "sill_course",
@@ -347,10 +344,167 @@ class BuildingFacadeMatFactoryLogged(AssetFactory):
                         f"{x0:.9f}, {x1:.9f}, {y0:.9f}, {y1:.9f}, "
                         f"{z0:.9f}, {z1:.9f})\n"
                     )
-                    f.write(f'obj.name = "{name}"\n')
-                    f.write("obj.parent = parent\n\n")
+                    f.write(f'obj.name = "{name}"\n\n')
 
         return output_path
 
     def export_sanitized_script(self, output_path: str) -> str:
         return self.export_logged_script(output_path)
+
+    # ------------------------------------------------------------------
+    # Refactored-script export (mirrors chair_logged_v2.export_refactored_script)
+    # ------------------------------------------------------------------
+
+    def _get_params_dict(self) -> dict:
+        """Return all generator parameters needed to reproduce the asset.
+
+        These become ``self.<name> = <value>`` lines in the refactored script's
+        ``__init__``. Includes both the constructor-time parameters AND the
+        per-call ``front_width`` / ``side_width`` (set in ``create_asset``).
+        """
+        return {
+            "wall_material": str(self.wall_material),
+            "ground_h": float(self.ground_h),
+            "floor_h": float(self.floor_h),
+            "side_margin": float(self.side_margin),
+            "door_h": float(self.door_h),
+            "door_w": float(self.door_w),
+            "roof_thickness": float(self.roof_thickness),
+            "n_upper_floors": int(self.n_upper_floors),
+            "tile_w": float(self.tile_w),
+            "sill": float(self.sill),
+            "win_h": float(self.win_h),
+            "win_top_gap": float(self.win_top_gap),
+            "depth": float(self.depth),
+            "opening_protrusion": float(self.opening_protrusion),
+            "win_pad_frac": float(self.win_pad_frac),
+            "lintel_h": float(self.lintel_h),
+            "sill_course_h": float(self.sill_course_h),
+            "lintel_overhang": float(self.lintel_overhang),
+            "height": float(self.height),
+            "front_width": float(self.front_width),
+            "side_width": float(self.side_width),
+        }
+
+    def export_refactored_script(self, output_path: str) -> str:
+        """Emit a ``Generator`` class that calls codebank helpers.
+
+        Layout mirrors ``chair_logged_v2.export_refactored_script``:
+
+            class Generator:
+                def __init__(self):
+                    self.<param> = <inline value>
+                    ...
+                    self._obj_to_label = {}
+                    self._label_counters = {}
+
+                def generate(self):
+                    parts = []
+                    _add_named_box(parts, "wall", ..., **kw)
+                    _build_facade(parts, ..., **kw)
+                    ...
+                    return parts
+
+        The codebank functions are produced by the AST extractor in
+        ``infinigen_examples/generate_logged_assets.py`` from
+        ``BuildingFacadeMatFactory``. Their signatures expose every state
+        attribute as a keyword-only parameter, so each helper invocation
+        passes state explicitly via ``kw=self.kw``.
+        """
+        if self._semantic_specs is None:
+            raise RuntimeError(
+                "No logged specs found. Run create_asset / spawn_asset first."
+            )
+
+        p = self._get_params_dict()
+
+        def fmt(v):
+            if isinstance(v, bool):
+                return str(v)
+            if isinstance(v, str):
+                return f'"{v}"'
+            if isinstance(v, (list, tuple)):
+                return str(list(v))
+            return str(v)
+
+        # Kwarg lists must mirror the keyword-only blocks emitted by the AST
+        # extractor for ``BuildingFacadeMatFactory``. If a self.X reference is
+        # added/removed inside one of these methods, regenerate codebank.py and
+        # update the matching list here.
+        helper_kwargs = {
+            "_add_named_box": [
+                "_label_counters", "_obj_to_label",
+            ],
+            "_build_facade": [
+                "_label_counters", "_obj_to_label",
+                "door_h", "door_w", "floor_h", "ground_h",
+                "lintel_h", "lintel_overhang", "n_upper_floors",
+                "opening_protrusion", "side_margin", "sill",
+                "sill_course_h", "tile_w", "win_h", "win_pad_frac",
+                "win_top_gap",
+            ],
+        }
+
+        def call(helper: str, *positional: str) -> str:
+            kws = ", ".join(f"{n}=self.{n}" for n in helper_kwargs[helper])
+            if positional:
+                return f"{helper}({', '.join(positional)}, {kws})"
+            return f"{helper}({kws})"
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("from codebank import _add_named_box, _build_facade\n\n\n")
+            f.write("class Generator:\n\n")
+
+            f.write("    def __init__(self):\n")
+            for k, v in p.items():
+                f.write(f"        self.{k} = {fmt(v)}\n")
+            f.write("        self._obj_to_label = {}\n")
+            f.write("        self._label_counters = {}\n")
+            f.write("\n")
+
+            f.write("    def generate(self):\n")
+            f.write("        parts = []\n")
+
+            # The four facade walls. Side walls are inset by self.depth on
+            # both ends so corners are owned by front/back walls (no overlap).
+            facades = [
+                ("0.0", "self.front_width", '"FRONT"', "(0, 0.0, 0.0)"),
+                ("0.0", "self.front_width", '"SIDE"',
+                 "(2, self.front_width, self.side_width)"),
+                ("self.depth", "self.side_width - self.depth", '"SIDE"',
+                 "(1, self.front_width, 0.0)"),
+                ("self.depth", "self.side_width - self.depth", '"SIDE"',
+                 "(3, 0.0, self.side_width)"),
+            ]
+            for x_start, x_end, kind, transform in facades:
+                rot_k, _, _ = transform.strip("()").split(",")
+                tx_ty = transform.strip("()").split(",")
+                tx = tx_ty[1].strip()
+                ty = tx_ty[2].strip()
+                wall_call = call(
+                    "_add_named_box",
+                    "parts", '"wall"', x_start, x_end,
+                    "0.0", "self.depth", "0.0", "self.height",
+                    rot_k.strip(), tx, ty,
+                )
+                f.write(f"        {wall_call}\n")
+                facade_call = call(
+                    "_build_facade",
+                    "parts", x_start, x_end, kind,
+                    "0.0", "self.depth", transform,
+                )
+                f.write(f"        {facade_call}\n")
+
+            roof_call = call(
+                "_add_named_box",
+                "parts", '"roof"', "0.0", "self.front_width",
+                "0.0", "self.side_width", "self.height",
+                "self.height + self.roof_thickness",
+            )
+            f.write(f"        {roof_call}\n")
+            f.write("        return parts\n\n\n")
+
+            f.write('if __name__ == "__main__":\n')
+            f.write("    Generator().generate()\n")
+
+        return output_path
